@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds install next to the release app (applicationId suffix ".debug"): make them easy to tell apart. -->
+<resources>
+    <string name="app_name">WisprCheap debug</string>
+    <string name="a11y_label">WisprCheap debug bubble</string>
+</resources>
