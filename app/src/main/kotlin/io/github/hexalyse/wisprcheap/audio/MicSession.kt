@@ -11,61 +11,32 @@ import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
 import android.os.SystemClock
 import io.github.hexalyse.wisprcheap.core.audio.Pcm
-import java.util.Locale
+import io.github.hexalyse.wisprcheap.core.settings.AudioSourceSetting
+import kotlin.math.log10
+import kotlin.math.sqrt
 
-/** Measurements of one capture, used by the Phase 0 microphone tests. */
+/** Outcome of one capture. */
 data class MicResult(
     val error: String?,
     val samples: Int,
-    val peakDb: Double,
-    val allZero: Boolean,
-    val startLatencyMs: Long?,
     val firstDataMs: Long?,
-    val firstNonZeroMs: Long?,
-    val silencedAtStart: Boolean?,
     val silencedSeen: Boolean,
-    val readError: Int,
-    val routedDevice: String?,
-) {
-    val durationMs: Double get() = Pcm.durationMs(samples)
-
-    /** The system delivered real audio (the level itself depends on whether the user spoke). */
-    val ok: Boolean get() = error == null && samples > 0 && !allZero && !silencedSeen && readError == 0
-
-    fun summary(): String = when {
-        error != null -> "failed: $error"
-        samples == 0 -> "no audio data (read error $readError)"
-        allZero -> "all zeros: silenced by the system" + if (silencedSeen) " (isClientSilenced=true)" else ""
-        else -> String.format(
-            Locale.ROOT, "%.1f s, peak %.1f dBFS%s, first data after %d ms%s",
-            durationMs / 1000, peakDb, if (peakDb < -55) " (quiet: did you speak?)" else "",
-            firstDataMs ?: -1, if (silencedSeen) ", SILENCED at some point" else "",
-        )
-    }
-
-    fun details(): List<Pair<String, String>> = listOf(
-        "error" to (error ?: "none"),
-        "samples" to "$samples (${String.format(Locale.ROOT, "%.2f", durationMs / 1000)} s)",
-        "peakDbfs" to String.format(Locale.ROOT, "%.1f", peakDb),
-        "allZero" to "$allZero",
-        "startRecording latency ms" to "${startLatencyMs ?: "-"}",
-        "first data ms" to "${firstDataMs ?: "-"}",
-        "first non-zero ms" to "${firstNonZeroMs ?: "-"}",
-        "isClientSilenced at start" to "${silencedAtStart ?: "-"}",
-        "isClientSilenced seen" to "$silencedSeen",
-        "read error" to "$readError",
-        "routed device" to (routedDevice ?: "-"),
-    )
-}
+)
 
 /**
- * One microphone capture: 16 kHz mono PCM16, VOICE_RECOGNITION source, opened on [start] and released on [stop].
- * Latencies are measured from `requestedAt` (e.g. the moment the user touched the bubble).
+ * One microphone capture: 16 kHz mono PCM16, opened on [start] and released on [stop] (desktop parity: the mic
+ * indicator is only on while recording). [onLevel] receives a 0..1 level every ~50 ms, from the capture thread.
  */
 class MicSession(
     private val context: Context,
-    private val source: Int = MediaRecorder.AudioSource.VOICE_RECOGNITION,
+    source: AudioSourceSetting = AudioSourceSetting.VOICE_RECOGNITION,
+    private val onLevel: ((Float) -> Unit)? = null,
 ) {
+    private val audioSource = when (source) {
+        AudioSourceSetting.VOICE_RECOGNITION -> MediaRecorder.AudioSource.VOICE_RECOGNITION
+        AudioSourceSetting.MIC -> MediaRecorder.AudioSource.MIC
+        AudioSourceSetting.UNPROCESSED -> MediaRecorder.AudioSource.UNPROCESSED
+    }
     private var record: AudioRecord? = null
     private var thread: Thread? = null
 
@@ -73,18 +44,14 @@ class MicSession(
     private var buffer = ShortArray(Pcm.SAMPLE_RATE * 30)
     private var count = 0
     private var requestedAt = 0L
-    private var startedAt = 0L
 
     @Volatile private var firstDataAt = 0L
 
-    @Volatile private var firstNonZeroAt = 0L
-
     @Volatile private var silencedSeen = false
-    private var silencedAtStart: Boolean? = null
 
     @Volatile private var readError = 0
-    private var error: String? = null
-    private var routedDevice: String? = null
+    var error: String? = null
+        private set
 
     private val callback = object : AudioManager.AudioRecordingCallback() {
         override fun onRecordingConfigChanged(configs: List<AudioRecordingConfiguration>) {
@@ -92,25 +59,23 @@ class MicSession(
         }
     }
 
-    /** Returns false (with the reason in the result) if the microphone could not be started. */
+    /** Opens the microphone. Returns false (with [error] set) if it could not start. Blocking: call off the main thread. */
     @SuppressLint("MissingPermission")
     fun start(requestedAtMs: Long = SystemClock.elapsedRealtime()): Boolean {
         requestedAt = requestedAtMs
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            error = "RECORD_AUDIO permission not granted"
+            error = "the microphone permission is not granted"
             return false
         }
         try {
-            val minBuf = AudioRecord.getMinBufferSize(
-                Pcm.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-            )
+            val minBuf = AudioRecord.getMinBufferSize(Pcm.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (minBuf <= 0) {
-                error = "getMinBufferSize returned $minBuf (16 kHz mono not supported?)"
+                error = "16 kHz mono capture is not supported (getMinBufferSize=$minBuf)"
                 return false
             }
             val rec = AudioRecord.Builder()
                 .setContext(context)
-                .setAudioSource(source)
+                .setAudioSource(audioSource)
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setSampleRate(Pcm.SAMPLE_RATE)
@@ -122,20 +87,17 @@ class MicSession(
                 .build()
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
                 rec.release()
-                error = "AudioRecord not initialized"
+                error = "the microphone could not be initialized"
                 return false
             }
             record = rec
             rec.registerAudioRecordingCallback(context.mainExecutor, callback)
             rec.startRecording()
-            startedAt = SystemClock.elapsedRealtime()
             if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                error = "startRecording() did not start (state ${rec.recordingState})"
+                error = "the microphone did not start (it may be used by another app)"
                 release()
                 return false
             }
-            silencedAtStart = rec.activeRecordingConfiguration?.isClientSilenced
-            routedDevice = rec.routedDevice?.let { "${it.productName} (type ${it.type})" }
             running = true
             thread = Thread({ loop(rec) }, "wc-mic-read").also { it.start() }
             return true
@@ -149,6 +111,8 @@ class MicSession(
     private fun loop(rec: AudioRecord) {
         val chunk = ShortArray(320) // 20 ms
         var lastCheck = 0L
+        var levelSum = 0.0
+        var levelCount = 0
         while (running) {
             val n = rec.read(chunk, 0, chunk.size)
             if (n < 0) {
@@ -158,15 +122,22 @@ class MicSession(
             if (n == 0) continue
             val now = SystemClock.elapsedRealtime()
             if (firstDataAt == 0L) firstDataAt = now
-            if (firstNonZeroAt == 0L) {
-                for (i in 0 until n) if (chunk[i].toInt() != 0) {
-                    firstNonZeroAt = now
-                    break
-                }
-            }
             if (count + n > buffer.size) buffer = buffer.copyOf(maxOf(buffer.size * 2, count + n))
             System.arraycopy(chunk, 0, buffer, count, n)
             count += n
+            if (onLevel != null) {
+                for (i in 0 until n) {
+                    val v = chunk[i] / 32768.0
+                    levelSum += v * v
+                }
+                levelCount += n
+                if (levelCount >= 800) {
+                    val db = 20 * log10(sqrt(levelSum / levelCount).coerceAtLeast(1e-6))
+                    onLevel.invoke(((db + 60) / 50).toFloat().coerceIn(0f, 1f))
+                    levelSum = 0.0
+                    levelCount = 0
+                }
+            }
             if (now - lastCheck > 250) {
                 lastCheck = now
                 if (rec.activeRecordingConfiguration?.isClientSilenced == true) silencedSeen = true
@@ -174,25 +145,14 @@ class MicSession(
         }
     }
 
+    /** Stops and releases the microphone. Blocking. */
     fun stop(): MicResult {
         running = false
         runCatching { record?.stop() }
         thread?.join(1500)
         release()
-        fun since(t: Long) = if (t == 0L) null else t - requestedAt
-        return MicResult(
-            error = error,
-            samples = count,
-            peakDb = Pcm.loudestWindowDb(buffer, count),
-            allZero = Pcm.isAllZero(buffer, count),
-            startLatencyMs = since(startedAt),
-            firstDataMs = since(firstDataAt),
-            firstNonZeroMs = since(firstNonZeroAt),
-            silencedAtStart = silencedAtStart,
-            silencedSeen = silencedSeen,
-            readError = readError,
-            routedDevice = routedDevice,
-        )
+        if (error == null && readError != 0) error = "microphone read error $readError"
+        return MicResult(error, count, if (firstDataAt == 0L) null else firstDataAt - requestedAt, silencedSeen)
     }
 
     /** Captured samples (valid after [stop]). */

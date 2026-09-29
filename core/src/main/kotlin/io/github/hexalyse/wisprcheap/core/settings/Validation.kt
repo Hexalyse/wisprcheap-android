@@ -50,22 +50,24 @@ object Validation {
             )
         }
 
-        check(s.transcription.timeoutMs > 0, "transcription.timeoutMs", "Must be greater than 0")
-        check(s.polish.timeoutMs > 0, "polish.timeoutMs", "Must be greater than 0")
-        check(s.command.timeoutMs > 0, "command.timeoutMs", "Must be greater than 0")
-        check(s.translation.timeoutMs > 0, "translation.timeoutMs", "Must be greater than 0")
-        check(s.recording.maxDurationSec > 0, "recording.maxDurationSec", "Must be greater than 0")
-        check(s.recording.silenceThresholdDb <= 0, "recording.silenceThresholdDb", "Must be 0 or less")
-        check(s.polish.temperature?.let { it in 0.0..2.0 } ?: true, "polish.temperature", "Between 0 and 2")
-        check(
+        // Range problems are reported but never block dictation (the pipeline copes with odd values).
+        fun range(ok: Boolean, path: String, msg: String) = check(ok, path, msg, blocking = false)
+        range(s.transcription.timeoutMs > 0, "transcription.timeoutMs", "Must be greater than 0")
+        range(s.polish.timeoutMs > 0, "polish.timeoutMs", "Must be greater than 0")
+        range(s.command.timeoutMs > 0, "command.timeoutMs", "Must be greater than 0")
+        range(s.translation.timeoutMs > 0, "translation.timeoutMs", "Must be greater than 0")
+        range(s.recording.maxDurationSec > 0, "recording.maxDurationSec", "Must be greater than 0")
+        range(s.recording.silenceThresholdDb <= 0, "recording.silenceThresholdDb", "Must be 0 or less")
+        range(s.polish.temperature?.let { it in 0.0..2.0 } ?: true, "polish.temperature", "Between 0 and 2")
+        range(
             s.command.llm.temperature?.let { it in 0.0..2.0 } ?: true, "command.temperature", "Between 0 and 2",
         )
-        check(
+        range(
             s.translation.llm.temperature?.let { it in 0.0..2.0 } ?: true, "translation.temperature",
             "Between 0 and 2",
         )
-        check(s.polish.instructions.isNotBlank(), "polish.instructions", "Must not be empty")
-        check(s.bubble.tapMaxMs >= s.bubble.micStartDelayMs, "bubble.tapMaxMs", "Must be ≥ the hold delay")
+        range(s.polish.instructions.isNotBlank(), "polish.instructions", "Cleanup instructions must not be empty")
+        range(s.bubble.tapMaxMs >= s.bubble.micStartDelayMs, "bubble.tapMaxMs", "Must be ≥ the hold delay")
         return out
     }
 

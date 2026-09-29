@@ -927,9 +927,23 @@ keyboard, dark mode, TalkBack on, battery saver, reboot (the service comes back)
 |---|---|---|---|
 | M0 | Spike | Section 4 | Mic strategy and insertion order decided; compatibility table filled |
 | M1 | Core | `:core` complete with tests (settings, STT, LLM, prompts, pricing, history model, stats, gesture machine, policies, pipeline) | **Done 2026-09-29**: 75 unit tests green, including the pipeline against a mock HTTP server. The real-key check moved to after M2+M4, since keys are entered in the app's settings |
-| M2 | Android plumbing | AppGraph, settings/secrets, Room, LogStore, Recorder, a11y service with EditorTracker/ImeWindowTracker, TextInserter, JobQueue, Notifier | A debug button dictates into the focused field end to end |
-| M3 | Bubble | Overlay window, Compose bubble, all gestures, hands-free toolbar, zones, positioning, haptics, TalkBack actions | Dictation works in the matrix apps with hold and tap |
-| M4 | App UI | Theme, onboarding, Home, Activity (History/Stats/Log), Dictionary, all Settings, QS tiles, Diagnostics | A new user can go from install to first dictation using only the app |
+| M2 | Android plumbing | AppGraph, settings/secrets, history, LogStore, Recorder, a11y service with editor/keyboard tracking, TextInserter, JobQueue, Notifier | **First version 2026-09-29** (awaiting on-device test with real keys) |
+| M3 | Bubble | Overlay window, Compose bubble, all gestures, hands-free toolbar, zones, positioning, haptics, TalkBack click | **First version 2026-09-29** (awaiting on-device test) |
+| M4 | App UI | Theme, setup checklist, Home, Activity (History/Stats/Log), Dictionary, all Settings, QS tiles, diagnostics | **First version 2026-09-29** (awaiting on-device test) |
+
+**Implementation notes (M2–M4), where the code differs from the sections above**
+- **History**: stored as `files/history.jsonl` in the desktop format, loaded in memory, instead of
+  Room. It's simpler, export is the same file, and a phone's history is small.
+- **Navigation**: the app uses a small state-based navigation (4 tabs plus settings pages), not the
+  Navigation library. The onboarding is the "Finish setup" checklist on Home rather than a pager.
+- **Icons**: `material-icons-extended`; R8 removes the unused ones in release builds.
+- **Overlay**: Jetpack Compose in one `TYPE_ACCESSIBILITY_OVERLAY` window, resized per state (bubble,
+  hold with the command/cancel chip above it, hands-free toolbar). It uses a custom lifecycle owner.
+  Touches go to `GestureMachine` in screen coordinates; toolbar buttons are Compose buttons.
+- **Diagnostics**: the About page shows the live editor/keyboard state; the microphone test (level
+  and loudest dBFS against the silence threshold) is on the Recording page.
+- **Not in the first version**: pending-count badge on the bubble, TalkBack custom actions beyond a
+  click, and a history search box.
 | M5 | Command + translation | Selection capture/replace, ✨ flows, pairs, badge, tile | The command and translation rows of the matrix pass |
 | M6 | Hardening + release | Matrix run, OEM checks, retention cleanup, R8, signing, CI release, README (install + restricted settings + privacy) | Signed APK `v1.0.0` on a GitHub release |
 
