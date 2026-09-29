@@ -21,6 +21,7 @@ import io.github.hexalyse.wisprcheap.data.HistoryRepository
 import io.github.hexalyse.wisprcheap.data.LogStore
 import io.github.hexalyse.wisprcheap.data.SecretStore
 import io.github.hexalyse.wisprcheap.data.SettingsRepository
+import io.github.hexalyse.wisprcheap.sync.SyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,12 +37,18 @@ class AppGraph(val app: Application) {
     val log = LogStore(File(app.filesDir, "logs"))
     val settings = SettingsRepository(File(app.filesDir, "settings.json"), scope) { log.error(it) }
     val secrets = SecretStore(File(app.filesDir, "secrets.bin"), scope) { log.error(it) }
-    val history = HistoryRepository(File(app.filesDir, "history.jsonl")) { settings.current.history.enabled }
+    val history: HistoryRepository = HistoryRepository(
+        File(app.filesDir, "history.jsonl"),
+        persist = { settings.current.history.enabled },
+        deviceId = { sync.deviceId },
+        onDeleted = { sync.historyDeleted(it) },
+    )
     val failedAudio = FailedAudioFiles(File(app.filesDir, "recordings"))
     val state = AppState()
     val notifier = Notifier(app, settings)
     val http = Http.client("wisprcheap-android/${BuildConfig.VERSION_NAME}")
     val chat = ChatClient(http)
+    val sync: SyncManager = SyncManager(app, settings, secrets, { history }, http, log, scope)
 
     /** Set by the accessibility service while it runs; otherwise results only go to the clipboard. */
     @Volatile var delivery: Delivery? = null
@@ -132,6 +139,7 @@ class AppGraph(val app: Application) {
             if (deleted > 0) log.info("Deleted $deleted saved recording(s) older than ${settings.current.history.failedAudioRetentionDays} days.")
         }
         banner(settings.current)
+        sync.start()
     }
 
     private fun banner(s: Settings) {
@@ -154,6 +162,9 @@ class AppGraph(val app: Application) {
                 " (currently: ${TranslationPairs.active(s.translation)?.label ?: "off"})",
         )
         log.detail("  dictionary: ${s.dictionary.size} term(s)")
+        sync.status.value.let { st ->
+            log.detail("  sync:       " + if (sync.connected) "${st.server} as \"${st.deviceName}\"" else "off")
+        }
         Validation.issues(s, secrets.current).forEach { log.detail("  setup:      ${it.message}") }
     }
 }

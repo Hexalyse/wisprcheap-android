@@ -52,6 +52,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,10 +68,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.hexalyse.wisprcheap.WisprApp
 import io.github.hexalyse.wisprcheap.core.history.HistoryEntry
 import io.github.hexalyse.wisprcheap.core.history.Money
+import io.github.hexalyse.wisprcheap.core.history.MonthTotals
 import io.github.hexalyse.wisprcheap.core.history.Stats
 import io.github.hexalyse.wisprcheap.core.settings.Validation
 import io.github.hexalyse.wisprcheap.core.translate.TranslationPairs
 import io.github.hexalyse.wisprcheap.overlay.RecordRed
+import io.github.hexalyse.wisprcheap.sync.SyncManager
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -271,11 +274,27 @@ private fun SetupItem(title: String, subtitle: String, done: Boolean, action: @C
 }
 
 @Composable
-private fun MonthCard(entries: List<HistoryEntry>) {
+private fun MonthCard(allEntries: List<HistoryEntry>) {
     val zone = ZoneId.systemDefault()
     val today = LocalDate.now(zone)
     val month = "%04d-%02d".format(today.year, today.monthValue)
-    val totals = remember(entries) { Stats.monthTotals(entries, month, zone) }
+    val sync = WisprApp.graph.sync
+    val syncStatus by sync.status.collectAsStateWithLifecycle()
+    val serverMonth = syncStatus.month?.takeIf { it.month == month && syncStatus.phase != SyncManager.Phase.OFF }
+    var allDevices by rememberSaveable { mutableStateOf(false) }
+    val showAll = allDevices && serverMonth != null
+    // Other devices' entries (sync download) count only in "All devices".
+    val entries = remember(allEntries, showAll, syncStatus.phase) {
+        if (showAll) allEntries else allEntries.filter { it.device == null || it.device == sync.deviceId }
+    }
+    val totals = remember(entries, showAll, serverMonth) {
+        val m = serverMonth
+        if (allDevices && m != null) {
+            MonthTotals(month, m.totalUsd, m.words.toInt(), m.entries.toInt())
+        } else {
+            Stats.monthTotals(entries, month, zone)
+        }
+    }
     val perDay = remember(entries) {
         val days = IntArray(today.lengthOfMonth())
         entries.forEach { e ->
@@ -285,6 +304,16 @@ private fun MonthCard(entries: List<HistoryEntry>) {
         days
     }
     SectionCard(Stats.monthName(month)) {
+        if (serverMonth != null) {
+            Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !allDevices, onClick = { allDevices = false }, label = { Text("This phone") })
+                FilterChip(
+                    selected = allDevices,
+                    onClick = { allDevices = true },
+                    label = { Text(if (syncStatus.devices > 1) "All ${syncStatus.devices} devices" else "All devices") },
+                )
+            }
+        }
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.Bottom) {
             Text(Money.approx(totals.costUsd), style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(12.dp))

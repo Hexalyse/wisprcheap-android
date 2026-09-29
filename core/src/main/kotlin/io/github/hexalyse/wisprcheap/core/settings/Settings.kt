@@ -22,6 +22,8 @@ data class Settings(
     val history: HistorySettings = HistorySettings(),
     val notifications: NotificationSettings = NotificationSettings(),
     val pricing: PricingSettings = PricingSettings(),
+    /** Options of the optional sync (per device, never synced themselves). */
+    val sync: SyncSettings = SyncSettings(),
 ) {
     companion object {
         const val CURRENT_SCHEMA = 1
@@ -229,6 +231,14 @@ data class PriceOverride(
 @Serializable
 data class PricingSettings(
     val overrides: Map<String, PriceOverride> = emptyMap(),
+)
+
+@Serializable
+data class SyncSettings(
+    /** Send this phone's history (statistics readable by the server, text encrypted). */
+    val uploadHistory: Boolean = true,
+    /** Also add the other devices' entries to this phone's history. */
+    val downloadHistory: Boolean = false,
 )
 
 @Serializable

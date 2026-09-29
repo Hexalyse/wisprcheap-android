@@ -974,6 +974,7 @@ keyboard, dark mode, TalkBack on, battery saver, reboot (the service comes back)
 
 ## 16. Later / not in v1
 
+- ~~Sync with the desktop~~: done, see section 17.
 - "Add to WisprCheap dictionary" in the text-selection menu (`ACTION_PROCESS_TEXT`), and a "Voice
   command" entry there too (a small dialog activity; works even where the bubble can't show).
 - Import/export of the desktop `config.yaml` (dictionary, prompts, models) through the file picker.
@@ -981,6 +982,27 @@ keyboard, dark mode, TalkBack on, battery saver, reboot (the service comes back)
   package is known.
 - Bluetooth headset mic; home-screen widget; a voice-IME mode; streaming/real-time STT; lowercasing
   the first letter when inserting mid-sentence.
+
+## 17. Sync (implemented after v0.1.0)
+
+Design and wire format: the desktop repo's `server/PLAN.md` and `sync/SPEC.md` (normative).
+
+- **`:core` `sync/`** (pure Kotlin): `Crypto.kt` (Argon2id from Bouncy Castle, AES-GCM and HMAC from
+  the JCA, HKDF by hand), `Hlc.kt`, `Protocol.kt` (wire types, `HistoryStats.fromEntry`), `SyncApi.kt`
+  (OkHttp), `Profile.kt` (`Settings`/`ApiKeys` ↔ records, `LlmOverride` ↔ tri-state, merge keeping
+  per-device fields), `SyncEngine.kt` (state, outbox, first-sync merge, push, history upload with
+  tombstones for deleted entries, download, month statistics).
+- **Tests**: `VectorsTest` runs the desktop's `vectors.json` (copied to `core/src/test/resources/sync`);
+  `ProfileTest`; `SyncEngineTest` against a MockWebServer fake of the server; `InteropTest` against a
+  real server (skipped unless `WCTEST_SERVER` is set). Checked end to end with the desktop CLI and the
+  real server on 2026-09-29.
+- **App**: `sync/SyncManager.kt` (pairing in two steps: code, then passphrase; triggers: start, settings
+  or key change after 3 s, new history entry after 10 s, `SyncWorker` every 15 min with network,
+  "Sync now"; backoff up to 30 min), `data/SyncCredentialStore.kt` (server, token, data key; Keystore),
+  state in `files/sync/state.json`. Settings → **Sync** page, `wisprcheap://pair` deep link on
+  `MainActivity`, Home's month card gets "This phone / All devices".
+- **History**: entries get `id` (UUID) and `device`; older ones use UUIDv5(device, ts) like the desktop.
+  `settings.sync.uploadHistory` (default on) and `downloadHistory` (default off) are per device.
 
 ---
 

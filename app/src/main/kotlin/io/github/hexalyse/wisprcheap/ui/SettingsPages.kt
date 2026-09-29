@@ -86,6 +86,7 @@ fun SettingsPage(page: Page, onBack: () -> Unit) {
             Page.RECORDING -> recordingPage(s)
             Page.HISTORY -> historyPage(s)
             Page.PRICING -> pricingPage(s)
+            Page.SYNC -> syncPage(s)
             Page.ABOUT -> aboutPage(context)
         }
     }

@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -28,14 +29,24 @@ import io.github.hexalyse.wisprcheap.WisprApp
 import io.github.hexalyse.wisprcheap.core.settings.Provider
 import io.github.hexalyse.wisprcheap.core.settings.Validation
 import io.github.hexalyse.wisprcheap.core.translate.TranslationPairs
+import io.github.hexalyse.wisprcheap.sync.SyncManager
 
 @Composable
 fun SettingsHome(onOpen: (Page) -> Unit) {
     val g = WisprApp.graph
     val s by g.settings.settings.collectAsStateWithLifecycle()
     val keys by g.secrets.keys.collectAsStateWithLifecycle()
+    val sync by g.sync.status.collectAsStateWithLifecycle()
     val missing = Validation.issues(s, keys).count { it.path.endsWith("apiKey") }
     val t = s.transcription
+    val syncSummary = when (sync.phase) {
+        SyncManager.Phase.OFF -> "Off · keep your phones and computers in sync"
+        SyncManager.Phase.OK, SyncManager.Phase.SYNCING -> "On · ${sync.server.substringAfter("://")}"
+        SyncManager.Phase.OFFLINE -> "Offline"
+        SyncManager.Phase.DISCONNECTED -> "Disconnected"
+        SyncManager.Phase.NEEDS_KEY -> "Passphrase needed"
+        SyncManager.Phase.ERROR -> "Error"
+    }
     val rows: List<Triple<Page, ImageVector, String>> = listOf(
         Triple(Page.KEYS, Icons.Rounded.Key, if (missing > 0) "$missing key(s) missing" else "ElevenLabs, OpenAI and other endpoints"),
         Triple(
@@ -55,6 +66,7 @@ fun SettingsHome(onOpen: (Page) -> Unit) {
         Triple(Page.RECORDING, Icons.Rounded.Mic, "Durations, silence threshold, audio source"),
         Triple(Page.HISTORY, Icons.Rounded.Security, "History, saved recordings, log, notifications"),
         Triple(Page.PRICING, Icons.Rounded.AttachMoney, "Price table and custom model prices"),
+        Triple(Page.SYNC, Icons.Rounded.Sync, syncSummary),
         Triple(Page.ABOUT, Icons.Rounded.Info, "Version, service status, microphone test"),
     )
     LazyColumn(

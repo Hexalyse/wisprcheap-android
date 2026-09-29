@@ -44,6 +44,7 @@ enum class Page(val title: String) {
     RECORDING("Recording"),
     HISTORY("History, privacy & notifications"),
     PRICING("Prices"),
+    SYNC("Sync"),
     ABOUT("About & diagnostics"),
 }
 
@@ -61,6 +62,7 @@ fun AppUi(open: MutableState<String?>) {
                 activityTab = 2
             }
             MainActivity.OPEN_KEYS -> page = Page.KEYS
+            MainActivity.OPEN_SYNC -> page = Page.SYNC
         }
         open.value = null
     }

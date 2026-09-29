@@ -37,6 +37,10 @@ enum class Delivered(val id: String) { INSERTED("inserted"), PASTED("pasted"), C
 data class HistoryEntry(
     /** ISO UTC with milliseconds, e.g. "2026-09-29T12:34:56.789Z" (when processing started). */
     val ts: String,
+    /** Unique id (UUID). Entries written before sync existed have none. */
+    val id: String? = null,
+    /** Sync device id of the device that recorded it (null when sync is off). */
+    val device: String? = null,
     /** "command" for command mode; null for dictation. */
     val mode: String? = null,
     val durationSec: Double = 0.0,
@@ -84,6 +88,8 @@ fun round7(v: Double): Double = (v * 1e7).roundToLong() / 1e7
 object HistoryJson {
     fun encode(e: HistoryEntry): JsonObject = buildJsonObject {
         put("ts", e.ts)
+        e.id?.let { put("id", it) }
+        e.device?.let { put("device", it) }
         e.mode?.let { put("mode", it) }
         put("durationSec", e.durationSec)
         putJsonObject("transcription") {
@@ -131,6 +137,8 @@ object HistoryJson {
         val c = o["costUsd"] as? JsonObject
         return HistoryEntry(
             ts = str(o["ts"]) ?: "",
+            id = str(o["id"]),
+            device = str(o["device"]),
             mode = str(o["mode"]),
             durationSec = (o["durationSec"] as? JsonPrimitive)?.doubleOrNull ?: 0.0,
             transcription = TranscriptionInfo(

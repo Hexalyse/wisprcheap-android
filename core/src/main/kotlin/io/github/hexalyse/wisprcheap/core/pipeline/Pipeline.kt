@@ -90,6 +90,7 @@ class Pipeline(
 
     private fun newEntry(job: Job, startedAt: Instant) = HistoryEntry(
         ts = Timestamps.iso(startedAt),
+        id = java.util.UUID.randomUUID().toString(),
         durationSec = round2(Pcm.durationMs(job.pcm.size) / 1000.0),
         transcription = TranscriptionInfo(transcriber.provider.id, transcriber.model, 0, transcriber.keytermCount),
         app = if (settings.history.recordTargetApp) job.targetApp else null,

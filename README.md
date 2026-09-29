@@ -24,6 +24,8 @@ the same providers, prompts, prices and history format.
   clipboard. There are fallbacks for unusual apps.
 - **History, monthly cost and word stats, and a log**, all kept on the phone. The history can be
   exported in the desktop `history.jsonl` format.
+- **Optional sync** with your computers and other phones through your own
+  [wisprcheap sync server](https://github.com/Hexalyse/wisprcheap/tree/main/server) (see below).
 - Haptic feedback, a draggable bubble that follows the keyboard, excluded apps, and a dark/light
   Material You theme.
 
@@ -55,15 +57,33 @@ Updates install over the previous version: every release is signed with the same
 | Slide away while holding | Cancels |
 | Drag the bubble | Moves it (it keeps its distance above the keyboard) |
 
+## Sync (optional)
+
+If you run a [wisprcheap sync server](https://github.com/Hexalyse/wisprcheap/tree/main/server), the
+phone can share its settings with the desktop app and your other phones: speech-to-text, cleanup,
+command and translation settings, the API keys, the dictionary, translation pairs and custom prices.
+The history can be uploaded too, so Home can show **this month for all your devices**.
+
+1. On the server's web page, click **Connect a device**.
+2. Scan the QR code with the phone's camera (it opens WisprCheap), or go to *Settings → Sync* and type
+   the server address and the 8-character code.
+3. The first device chooses a **sync passphrase**; the next ones ask for it.
+
+Everything is end-to-end encrypted with that passphrase before it leaves the phone: the server only
+reads the history statistics (dates, durations, models, word counts and costs), never your text or
+keys. The bubble, recording, text insertion and history options stay per phone. Sync runs a few
+seconds after a change, every 15 minutes, and from *Sync now*.
+
 ## Privacy
 
 - The accessibility service only looks at the focused text field: its type, and the text around the
   cursor or the selection when you dictate. It is needed to show the bubble, record from other apps
   and insert text.
 - Audio goes only to the speech-to-text service you chose, and text only to the LLM endpoints you
-  configured. There are no analytics.
-- API keys are encrypted with a key held in the Android Keystore. Settings, history and logs stay in
-  the app's private storage and are excluded from backups.
+  configured. There are no analytics. With sync on, the encrypted profile and history also go to your
+  own sync server.
+- API keys (and the sync token and key) are encrypted with a key held in the Android Keystore.
+  Settings, history and logs stay in the app's private storage and are excluded from backups.
 
 ## Build from source
 

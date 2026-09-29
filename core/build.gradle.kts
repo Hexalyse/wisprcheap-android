@@ -21,6 +21,8 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
     api(libs.kotlinx.serialization.json)
     api(libs.okhttp)
+    // Argon2id for the sync passphrase (pure Java; R8 keeps only what's used).
+    implementation(libs.bouncycastle.prov)
 
     testImplementation(libs.kotlin.test.junit)
     testImplementation(libs.kotlinx.coroutines.test)

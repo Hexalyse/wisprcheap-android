@@ -23,6 +23,10 @@ import java.io.OutputStream
 class HistoryRepository(
     private val file: File,
     private val persist: () -> Boolean,
+    /** Sync device id stamped on new entries (null when sync is off). */
+    private val deviceId: () -> String? = { null },
+    /** Called with entries the user deleted (sync deletes them on the server too). */
+    private val onDeleted: suspend (List<HistoryEntry>) -> Unit = {},
 ) : HistoryStore {
     private val _entries = MutableStateFlow(load())
 
@@ -31,18 +35,27 @@ class HistoryRepository(
     private val lock = Mutex()
 
     override suspend fun add(entry: HistoryEntry) {
-        _entries.update { it + entry }
+        val stamped = if (entry.device == null) entry.copy(device = deviceId()) else entry
+        _entries.update { it + stamped }
         if (persist()) {
             lock.withLock {
-                withContext(Dispatchers.IO) { file.appendText(HistoryJson.encodeLine(entry) + "\n") }
+                withContext(Dispatchers.IO) { file.appendText(HistoryJson.encodeLine(stamped) + "\n") }
             }
         }
+    }
+
+    /** Entries of other devices (sync download), merged by date. */
+    suspend fun addAll(entries: List<HistoryEntry>) {
+        if (entries.isEmpty()) return
+        _entries.update { (it + entries).sortedBy { e -> e.ts } }
+        if (persist()) rewrite()
     }
 
     suspend fun delete(entry: HistoryEntry) {
         _entries.update { it - entry }
         entry.audioFile?.let { runCatching { File(it).delete() } }
         rewrite()
+        onDeleted(listOf(entry))
     }
 
     suspend fun clear() {
@@ -50,6 +63,7 @@ class HistoryRepository(
         _entries.value = emptyList()
         old.forEach { e -> e.audioFile?.let { runCatching { File(it).delete() } } }
         rewrite()
+        onDeleted(old)
     }
 
     /** Writes the whole history as JSONL (desktop-compatible) to [out]. */
