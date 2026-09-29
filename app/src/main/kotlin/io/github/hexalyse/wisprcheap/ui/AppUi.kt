@@ -2,6 +2,8 @@ package io.github.hexalyse.wisprcheap.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
@@ -83,7 +85,7 @@ fun AppUi(open: MutableState<String?>) {
             }
         },
     ) { padding ->
-        Box(Modifier.padding(padding)) {
+        Box(Modifier.padding(padding).consumeWindowInsets(padding).imePadding()) {
             when (tab) {
                 Tab.HOME -> HomeScreen(onOpenPage = { page = it })
                 Tab.ACTIVITY -> ActivityScreen(activityTab, onTab = { activityTab = it })
