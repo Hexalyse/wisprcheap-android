@@ -983,7 +983,7 @@ keyboard, dark mode, TalkBack on, battery saver, reboot (the service comes back)
 - Bluetooth headset mic; home-screen widget; a voice-IME mode; streaming/real-time STT; lowercasing
   the first letter when inserting mid-sentence.
 
-## 17. Sync (implemented after v0.1.0)
+## 17. Sync (v0.2.0)
 
 Design and wire format: the desktop repo's `server/PLAN.md` and `sync/SPEC.md` (normative).
 
