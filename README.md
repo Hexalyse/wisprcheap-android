@@ -25,7 +25,7 @@ the same providers, prompts, prices and history format.
 - **History, monthly cost and word stats, and a log**, all kept on the phone. The history can be
   exported in the desktop `history.jsonl` format.
 - **Optional sync** with your computers and other phones through your own
-  [wisprcheap sync server](https://github.com/Hexalyse/wisprcheap/tree/main/server) (see below).
+  [wisprcheap sync server](https://github.com/Hexalyse/wisprcheap/tree/master/server) (see below).
 - Haptic feedback, a draggable bubble that follows the keyboard, excluded apps, and a dark/light
   Material You theme.
 
@@ -59,7 +59,7 @@ Updates install over the previous version: every release is signed with the same
 
 ## Sync (optional)
 
-If you run a [wisprcheap sync server](https://github.com/Hexalyse/wisprcheap/tree/main/server), the
+If you run a [wisprcheap sync server](https://github.com/Hexalyse/wisprcheap/tree/master/server), the
 phone can share its settings with the desktop app and your other phones: speech-to-text, cleanup,
 command and translation settings, the API keys, the dictionary, translation pairs and custom prices.
 The history can be uploaded too, so Home can show **this month for all your devices**.
