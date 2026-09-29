@@ -876,6 +876,13 @@ the first install without uninstalling. App label: `WisprCheap`.
 - Events from our own package are ignored.
 
 ### 12.4 Build, signing, CI
+
+**Done 2026-09-29.** Public repo <https://github.com/Hexalyse/wisprcheap-android>. The workflow is
+`.github/workflows/build.yml` (tests and a signed release APK on every push; a GitHub release for
+`v*` tags matching `wisprcheap.versionName` in `gradle.properties`). The release key
+(`CN=Hexalyse, O=WisprCheap`, SHA-256 `a0:88:be:7e:…:2f:4d`) is stored in the repo secrets
+`SIGNING_*` and backed up outside the repo. Debug builds use the application id suffix `.debug`.
+First release: v0.1.0 (versionCode 100). The original plan follows.
 - **Signing**: a release keystore kept outside the repo, `keystore.properties` git-ignored. Keep a
   backup: losing the key means reinstalling (and losing data) on every device. Before 2027, register
   it with a **limited distribution account** (section 2.9).
