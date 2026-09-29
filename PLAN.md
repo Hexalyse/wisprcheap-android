@@ -456,9 +456,10 @@ fallbacks. For events not tied to a touch (e.g. an error after processing), use
   - Id: `"fr>en"`, or `"auto>en"` when `from` is null.
   - Label: `"French → English"`, or `"Any → English"`.
   - Duplicate ids are dropped.
-- Languages come from `java.util.Locale`: the ISO-639-1 codes, with English display names
-  (`Locale(code).getDisplayLanguage(Locale.ENGLISH)`) for the prompt and the phone's language for the
-  UI. This replaces the desktop's `lang.rs` table; names may differ slightly, which is harmless.
+- Languages come from the desktop's `lang.rs` table, ported as `core/translate/Languages.kt`: codes,
+  3-letter aliases and English names, the same on the JVM and on Android. `java.util.Locale` was
+  rejected in M1 because Android still returns legacy codes (e.g. `iw` for Hebrew). The UI can still
+  show names in the phone's language.
 - The active pair (or off) is persisted. It can be switched in:
   - Home: segmented chips;
   - the Translate Quick Settings tile: cycles Off → pair 1 → pair 2 → …;
@@ -672,7 +673,7 @@ stored separately (section 11). Keys mirror the desktop's `config.yaml` where th
 | `transcription.openai.model` | string | `gpt-4o-transcribe` | or `gpt-4o-mini-transcribe`, `gpt-transcribe` |
 | `transcription.openai.prompt` | text | `""` | The vocabulary is appended automatically |
 | `polish.enabled` | bool | true | Called "Cleanup" in the UI |
-| `polish.apiKey` | secret | – | "Use the OpenAI transcription key" shortcut button |
+| `polish.apiKey` | secret | – | Empty = the OpenAI key, but only when the cleanup URL is on the OpenAI transcription host (so the key is never sent to another provider) |
 | `polish.baseUrl` | url | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
 | `polish.model` | string | `gpt-6-luna` | |
 | `polish.reasoningEffort` | string or null | `"none"` | null → field omitted |
@@ -756,6 +757,10 @@ private IPv4 address (`10.*`, `192.168.*`, `172.16-31.*`) or a `.local` host.
   When the file exceeds 1 MB at startup it is rotated to `.old`. Session marker:
   `=== WisprCheap started <date time> (pid N) ===`.
 - **Network**: one shared OkHttp client (keep-alive, HTTP/2), user agent `wisprcheap-android/<version>`.
+  - Only the per-call timeout applies (read/write timeouts are off), so a long transcription isn't
+    cut early.
+  - OkHttp's own `retryOnConnectionFailure` stays on in the app. It silently retries on a stale pooled
+    connection, which is common on mobile, and our single transcription retry comes on top of it.
   - Per-request `callTimeout` from the settings.
   - Cleartext HTTP is allowed (for LAN LLMs); the UI warns when a non-local URL uses `http://`.
 - **What the accessibility service reads**, stated in onboarding and README:
@@ -921,7 +926,7 @@ keyboard, dark mode, TalkBack on, battery saver, reboot (the service comes back)
 | # | Milestone | Content | Done when |
 |---|---|---|---|
 | M0 | Spike | Section 4 | Mic strategy and insertion order decided; compatibility table filled |
-| M1 | Core | `:core` complete with tests (settings, STT, LLM, prompts, pricing, history model, stats, gesture machine, policies, pipeline) | All unit tests green; a JVM CLI harness can transcribe a WAV and polish it with real keys |
+| M1 | Core | `:core` complete with tests (settings, STT, LLM, prompts, pricing, history model, stats, gesture machine, policies, pipeline) | **Done 2026-09-29**: 75 unit tests green, including the pipeline against a mock HTTP server. The real-key check moved to after M2+M4, since keys are entered in the app's settings |
 | M2 | Android plumbing | AppGraph, settings/secrets, Room, LogStore, Recorder, a11y service with EditorTracker/ImeWindowTracker, TextInserter, JobQueue, Notifier | A debug button dictates into the focused field end to end |
 | M3 | Bubble | Overlay window, Compose bubble, all gestures, hands-free toolbar, zones, positioning, haptics, TalkBack actions | Dictation works in the matrix apps with hold and tap |
 | M4 | App UI | Theme, onboarding, Home, Activity (History/Stats/Log), Dictionary, all Settings, QS tiles, Diagnostics | A new user can go from install to first dictation using only the app |
@@ -1100,7 +1105,8 @@ Base URLs have one trailing `/` removed before paths are appended.
   - `apiKey`: own value if non-empty, else `polish.apiKey`;
   - `baseUrl`, `model`: own value or polish's;
   - `reasoningEffort`, `temperature`: "unset" inherits polish's, while an explicit null means
-    "omit". Model this as a tri-state `Inherit | Omit | Value`.
+    "omit". In `Settings.kt` this is `LlmOverride`: `inheritReasoningEffort`/`inheritTemperature`
+    flags plus a nullable value.
   - `timeoutMs` is always the section's own value.
 
 ### B.4 Errors and retry
