@@ -163,6 +163,67 @@ compatibility table appended to this file.
 **Exit**: decide the mic strategy, the default insertion order and the visibility signals, then
 update sections 6 and 8 if needed.
 
+### 4.1 Phase 0 results (2026-09-29): **passed**
+
+Device: **Pixel 9 Pro XL, Android 17 (SDK 37, build CP3A.260905.009)**, keyboard **SwiftKey**. The
+app was installed with `adb install` (package source "other"). App: `0.0.1-spike` (commit `8079d50`).
+
+**Microphone** (VOICE_RECOGNITION, 16 kHz mono, started from a touch on the overlay while Messages
+was in front):
+
+| Test | Result | startRecording | First audio |
+|---|---|---|---|
+| `mic.hold`: push-to-talk after a 200 ms hold, recorded in the a11y service | ✅ real audio, never silenced | 80 ms | 173 ms |
+| `mic.direct`: 3 s, recorded in the a11y service | ✅ | 40 ms | 122 ms |
+| `mic.trampoline`: invisible activity → microphone FGS | ✅ (a brief flicker; the keyboard and input connection come back) | 44 ms | 130 ms |
+| `mic.fgs-from-service`: `startService` + `startForeground(MICROPHONE)` from the a11y service | ✅ **allowed**, contrary to the docs' exemption list (the a11y-bound process is apparently exempt) | 33 ms | 124 ms |
+
+Latencies are measured from the moment recording was requested.
+
+**Insertion and selection** (✅ = inserted and verified by reading the field back):
+
+| App (field) | Editor class / inputType | commitText | SET_TEXT | Paste (node) | Paste (IC) | Selection (IC / node) |
+|---|---|---|---|---|---|---|
+| Google Messages (compose) | EditText, text | ✅ | ✅ | ✅ | ✅ | ✅ / ✅ |
+| WhatsApp (chat) | EditText, text | ✅ | ✅ | ✅ | – | ✅ / ✅ |
+| Gmail (email body, web view) | EditText, web edit text | ✅ | ⚠️ inserted, but **cursor moved to 0** | ✅ | – | ✅ / ✅ (node uses a no-break space) |
+| Brave (web page field) | EditText, web edit text | ✅ | ✅ | ✅ | – | ✅ / ✅ |
+| Google app (search) | EditText, text | ✅ | ✅ | ✅ | – | ✅ / ✅ |
+
+The user also tried other apps by hand and everything worked; those runs were not logged in detail.
+Not covered yet: Google Docs, Chrome, Telegram, Keep, Termux, Compose/Flutter apps. They go into the
+M6 matrix.
+
+**Other findings**
+- `inputStarted` (from the a11y `InputMethod`) plus "IME window visible" was a reliable visibility
+  signal in every app tried. The surrounding text was always available (0 chars in an empty field).
+- The service can't read the clipboard (`primaryClip == null`), as expected.
+- `ACTION_SET_SELECTION` returned false on some native `EditText`s, but `SET_TEXT` had already put
+  the cursor at the end.
+- Opening our service's own accessibility page (`android.settings.ACCESSIBILITY_DETAILS_SETTINGS`)
+  requires a privileged permission. Onboarding must open the general accessibility list and say where
+  to find WisprCheap ("Downloaded apps").
+- The "restricted settings" block did not happen, because the app was installed over adb. It must be
+  re-tested with an APK installed from a file (M6).
+
+**Decisions**
+1. **Microphone**: record directly in the accessibility service (sections 6 and 3 unchanged).
+   - No trampoline in v1.
+   - A `microphone` foreground service *could* run during recordings (to show an ongoing
+     notification with Stop/Cancel and protect against OEM killers), but it's not needed. Decide
+     during M3.
+   - The Phase 0 test code (trampoline, FGS test) and its permissions are removed when the real
+     runtime replaces the spike (M2).
+2. **Insertion order confirmed**: `commitText` → `SET_TEXT` → paste → clipboard.
+   - After `SET_TEXT`, if the cursor isn't where expected, move it with the input connection's
+     `setSelection`.
+3. **Selection** (command mode): read with `getSurroundingText(0, 0, 0)`; fall back to the node.
+4. **Visibility**: the default policy `editing` (input started + keyboard visible) is confirmed.
+5. **Latency**: with `micStartDelayMs` = 200, audio starts about 370 ms after the finger touches
+   the bubble (200 ms hold + ~170 ms mic start).
+   - A tap (hands-free) starts ~120-170 ms after the finger lifts.
+   - This is acceptable. Pre-opening the mic on touch-down could hide the 170 ms later if needed.
+
 ---
 
 ## 5. The bubble
@@ -455,7 +516,9 @@ The **currently focused editor at delivery time** (desktop parity: Ctrl+V goes w
    - `current = node.isShowingHintText ? "" : node.text`;
    - `sel = textSelectionStart/End` (if −1, append at the end);
    - `new = current[0:selStart] + text + current[selEnd:]`;
-   - then `ACTION_SET_SELECTION(selStart+len, selStart+len)`; verify with `node.refresh()`.
+   - then `ACTION_SET_SELECTION(selStart+len, selStart+len)`; verify with `node.refresh()`. If the
+     cursor isn't there (it jumped to 0 in Gmail's web view in Phase 0), move it with the input
+     connection's `setSelection`.
    - Skip this step for WebView `contenteditable`, where it would replace the whole editor.
 3. **Clipboard + `ACTION_PASTE`**:
    - `setPrimaryClip(ClipData.newPlainText("wisprcheap", text))`, with `EXTRA_IS_SENSITIVE` when
@@ -572,6 +635,8 @@ The **currently focused editor at delivery time** (desktop parity: Ctrl+V goes w
      will show periodic privacy reminders;
    - if the toggle is greyed out: step-by-step "Allow restricted settings" with a button to App info
      (`ACTION_APPLICATION_DETAILS_SETTINGS`), then a button to `ACTION_ACCESSIBILITY_SETTINGS`;
+   - our service's own details page can't be opened directly (privileged permission, see 4.1), so
+     the screen says: "find **WisprCheap dictation bubble** under *Downloaded apps* and turn it on";
    - detect when the service is connected and move on automatically.
 6. **Battery** (recommended, important on Samsung/Xiaomi): ask to ignore battery optimisations.
 7. **Try it**: open another app (e.g. Messages), dictate, come back.
@@ -869,7 +934,7 @@ keyboard, dark mode, TalkBack on, battery saver, reboot (the service comes back)
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Background mic capture from the a11y service blocked or silenced on the user's device/OEM | Core feature | Phase 0 first; trampoline FGS fallback; last resort a voice IME |
+| Background mic capture from the a11y service blocked or silenced on the user's device/OEM | Core feature | **Passed on Pixel 9 Pro XL / Android 17 (4.1)**; other devices: trampoline FGS fallback (also proven to work); last resort a voice IME |
 | Insertion behaves differently per app | Wrong or missing text | Ladder with verification; per-app memory and override; clipboard fallback + notification |
 | Sideload friction: restricted settings, privacy reminders, 2027 developer verification | Setup pain | Onboarding guide; limited distribution account; adb for development |
 | OEM background killing (Samsung, Xiaomi) or force-stop disabling the service | Bubble disappears | Battery optimisation exemption; Home detects "service not running"; Diagnostics |
