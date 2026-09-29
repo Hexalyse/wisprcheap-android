@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WisprCheap</string>
+    <string name="a11y_label">WisprCheap dictation bubble</string>
+    <string name="a11y_description">Shows a small dictation bubble when you edit a text field, records your voice while you hold or tap it, and inserts the transcribed text at the cursor. WisprCheap only reads the focused text field (its type, and the text around the cursor or the selection when you dictate). It does not read or store anything else on your screen.</string>
+</resources>
