@@ -30,6 +30,12 @@ class OverlayState {
     var level by mutableFloatStateOf(0f)
     val levels = mutableStateListOf<Float>()
 
+    /** Hold layout: horizontal offset of the bubble from the window centre (the window is kept on screen). */
+    var holdOffsetXPx by mutableIntStateOf(0)
+
+    /** Hold layout: the hint chip goes below the bubble when there's no room above it. */
+    var chipBelow by mutableStateOf(false)
+
     fun pushLevel(value: Float) {
         level = value
         levels.add(value)

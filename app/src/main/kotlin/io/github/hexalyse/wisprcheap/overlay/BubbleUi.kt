@@ -98,11 +98,22 @@ fun OverlayContent(ui: OverlayState, onToolbar: (ToolbarButton) -> Unit, onToolb
         OverlayShape.HOLDING -> Column(
             Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Bottom,
+            verticalArrangement = if (ui.chipBelow) Arrangement.Top else Arrangement.Bottom,
         ) {
-            HoldChip(ui)
-            Spacer(Modifier.height(6.dp))
-            Box(Modifier.size((ui.sizeDp + BUBBLE_BOX_EXTRA_DP).dp), contentAlignment = Alignment.Center) { Bubble(ui) }
+            if (!ui.chipBelow) {
+                HoldChip(ui)
+                Spacer(Modifier.height(6.dp))
+            }
+            Box(
+                Modifier
+                    .offset { IntOffset(ui.holdOffsetXPx, 0) }
+                    .size((ui.sizeDp + BUBBLE_BOX_EXTRA_DP).dp),
+                contentAlignment = Alignment.Center,
+            ) { Bubble(ui) }
+            if (ui.chipBelow) {
+                Spacer(Modifier.height(6.dp))
+                HoldChip(ui)
+            }
         }
         OverlayShape.BUBBLE -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Bubble(ui) }
     }

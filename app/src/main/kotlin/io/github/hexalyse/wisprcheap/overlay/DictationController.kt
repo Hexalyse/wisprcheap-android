@@ -205,9 +205,14 @@ class DictationController(private val service: WisprAccessibilityService, privat
         when (shape) {
             OverlayShape.BUBBLE -> window.setBounds(anchorX - box / 2, anchorY - box / 2, box, box)
             OverlayShape.HOLDING -> {
-                val w = max(box, dp(HOLD_WIDTH_DP))
+                // The window (and so the hint chip) stays on screen; the bubble moves inside it to stay under the finger.
+                val w = max(box, dp(HOLD_WIDTH_DP)).coerceAtMost(sc.width)
                 val chip = dp(HOLD_CHIP_AREA_DP)
-                window.setBounds(anchorX - w / 2, anchorY - box / 2 - chip, w, box + chip)
+                val x = (anchorX - w / 2).coerceIn(0, max(0, sc.width - w))
+                val above = anchorY - box / 2 - chip >= sc.topInset
+                ui.holdOffsetXPx = anchorX - (x + w / 2)
+                ui.chipBelow = !above
+                window.setBounds(x, if (above) anchorY - box / 2 - chip else anchorY - box / 2, w, box + chip)
             }
             OverlayShape.TOOLBAR -> {
                 val w = dp(TOOLBAR_WIDTH_DP)
