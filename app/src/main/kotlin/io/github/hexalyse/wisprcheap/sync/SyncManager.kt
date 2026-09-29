@@ -1,16 +1,9 @@
 package io.github.hexalyse.wisprcheap.sync
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.AtomicFile
-import androidx.work.Constraints
-import androidx.work.CoroutineWorker
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.WorkerParameters
 import io.github.hexalyse.wisprcheap.BuildConfig
-import io.github.hexalyse.wisprcheap.WisprApp
 import io.github.hexalyse.wisprcheap.core.history.HistoryEntry
 import io.github.hexalyse.wisprcheap.core.settings.ApiKeys
 import io.github.hexalyse.wisprcheap.core.settings.Settings
@@ -53,12 +46,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
- * The optional sync of this phone: pairing, the passphrase, and background runs (at startup, a few
- * seconds after a settings change or a new history entry, every 15 minutes through WorkManager, and on
- * "Sync now"), with backoff when the server can't be reached.
+ * The optional sync of this phone: pairing, the passphrase, and the runs. It syncs when the app's
+ * screen opens (at most once a minute), a few seconds after a settings or key change, after each
+ * dictation (which also picks up the other devices' changes), and on "Sync now". There is no
+ * background schedule; when the server can't be reached, it retries with backoff while the process
+ * lives (the accessibility service keeps it alive).
  */
 class SyncManager(
     private val context: Context,
@@ -125,6 +119,10 @@ class SyncManager(
     private var failures = 0
     private var retryJob: Job? = null
 
+    /** `elapsedRealtime` when the last run started (limits the syncs on app open). */
+    @Volatile
+    private var lastRun = 0L
+
     private fun initialStatus(): Status {
         val c = credentials.current ?: return Status()
         val st = loadState()
@@ -162,18 +160,19 @@ class SyncManager(
     fun start() {
         scope.launch { settings.settings.drop(1).debounce(3_000).collect { if (connected) run() } }
         scope.launch { secrets.keys.drop(1).debounce(3_000).collect { if (connected) run() } }
+        // After dictations: uploads the entry (if enabled) and picks up the other devices' changes.
         scope.launch {
             history().entries.map { it.size }.distinctUntilChanged().drop(1).debounce(10_000).collect {
-                if (connected && settings.current.sync.uploadHistory) run()
+                if (connected) run()
             }
         }
-        if (connected) {
-            schedulePeriodic()
-            scope.launch {
-                delay(2_000)
-                run()
-            }
-        }
+    }
+
+    /** The app's screen was opened: sync, at most once a minute. */
+    fun onAppOpened() {
+        if (!connected || _status.value.phase == Phase.SYNCING) return
+        if (SystemClock.elapsedRealtime() - lastRun < APP_OPEN_INTERVAL_MS) return
+        scope.launch { run() }
     }
 
     fun syncNow() {
@@ -194,6 +193,7 @@ class SyncManager(
             return Result.failure(NeedsKeyException("missing key"))
         }
         retryJob?.cancel()
+        lastRun = SystemClock.elapsedRealtime()
         _status.update { it.copy(phase = Phase.SYNCING) }
         val started = System.nanoTime()
         val s = settings.current.sync
@@ -270,7 +270,6 @@ class SyncManager(
         deviceId = p.me.device.id
         _status.value = Status(Phase.SYNCING, p.server, p.me.user.username, p.me.device.name)
         log.info("[sync] Connected to ${p.server} as \"${p.me.device.name}\".")
-        schedulePeriodic()
         return run()
     }
 
@@ -344,20 +343,13 @@ class SyncManager(
         stateFile.delete()
         deviceId = null
         retryJob?.cancel()
-        WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         _status.value = Status()
         log.info("[sync] Disconnected from ${c.server}.")
     }
 
-    private fun schedulePeriodic() {
-        val request = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .build()
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, request)
-    }
-
     companion object {
-        const val WORK_NAME = "wisprcheap-sync"
+        /** Opening the app syncs at most this often ("Sync now" always does). */
+        private const val APP_OPEN_INTERVAL_MS = 60_000L
 
         /** Codes are shown as `ABCD-EFGH`: accept any case, spaces and dashes. */
         fun normalizeCode(code: String) = code.filterNot { it.isWhitespace() || it == '-' }.uppercase()
@@ -369,15 +361,5 @@ class SyncManager(
             val code = uri.getQueryParameter("code") ?: return null
             return server to code
         }
-    }
-}
-
-/** Periodic sync (15 min, when online). */
-class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result {
-        val sync = WisprApp.graph.sync
-        if (!sync.connected) return Result.success()
-        val result = sync.run()
-        return if (result.isSuccess || result.exceptionOrNull() !is SyncNetworkException) Result.success() else Result.retry()
     }
 }

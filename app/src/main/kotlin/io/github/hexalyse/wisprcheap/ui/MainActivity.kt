@@ -24,6 +24,11 @@ class MainActivity : ComponentActivity() {
         open.value = target(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        WisprApp.graph.sync.onAppOpened()
+    }
+
     /** What to show: an extra from a notification, or a `wisprcheap://pair` link. */
     private fun target(intent: Intent?): String? {
         SyncManager.parseLink(intent?.data)?.let { link ->

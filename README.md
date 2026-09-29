@@ -71,8 +71,9 @@ The history can be uploaded too, so Home can show **this month for all your devi
 
 Everything is end-to-end encrypted with that passphrase before it leaves the phone: the server only
 reads the history statistics (dates, durations, models, word counts and costs), never your text or
-keys. The bubble, recording, text insertion and history options stay per phone. Sync runs a few
-seconds after a change, every 15 minutes, and from *Sync now*.
+keys. The bubble, recording, text insertion and history options stay per phone. The phone syncs when
+you open the app, a few seconds after you change a setting or dictate, and from *Sync now*; there is
+no background schedule.
 
 ## Privacy
 

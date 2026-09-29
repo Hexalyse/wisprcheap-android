@@ -996,9 +996,11 @@ Design and wire format: the desktop repo's `server/PLAN.md` and `sync/SPEC.md` (
   `ProfileTest`; `SyncEngineTest` against a MockWebServer fake of the server; `InteropTest` against a
   real server (skipped unless `WCTEST_SERVER` is set). Checked end to end with the desktop CLI and the
   real server on 2026-09-29.
-- **App**: `sync/SyncManager.kt` (pairing in two steps: code, then passphrase; triggers: start, settings
-  or key change after 3 s, new history entry after 10 s, `SyncWorker` every 15 min with network,
-  "Sync now"; backoff up to 30 min), `data/SyncCredentialStore.kt` (server, token, data key; Keystore),
+- **App**: `sync/SyncManager.kt` (pairing in two steps: code, then passphrase; triggers: the main
+  screen opening (at most once a minute), settings or key change after 3 s, new history entry after
+  10 s (which also pulls the other devices' changes), "Sync now"; backoff up to 30 min while the
+  process lives). No periodic background work: a change made on another device reaches the phone at
+  the next dictation or app opening. `data/SyncCredentialStore.kt` (server, token, data key; Keystore),
   state in `files/sync/state.json`. Settings → **Sync** page, `wisprcheap://pair` deep link on
   `MainActivity`, Home's month card gets "This phone / All devices".
 - **History**: entries get `id` (UUID) and `device`; older ones use UUIDv5(device, ts) like the desktop.
