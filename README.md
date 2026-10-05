@@ -64,8 +64,8 @@ phone can share its settings with the desktop app and your other phones: speech-
 command and translation settings, the API keys, the dictionary, translation pairs and custom prices.
 The history can be uploaded too, so Home can show **this month for all your devices**.
 
-1. On the server's web page, click **Connect a device**.
-2. Scan the QR code with the phone's camera (it opens WisprCheap), or go to *Settings → Sync* and type
+1. On the server's web page, choose **Devices → Add a device**.
+2. Tap **Open WisprCheap** on the same phone, scan the QR code with the camera, or go to *Settings → Sync* and type
    the server address and the 8-character code.
 3. The first device chooses a **sync passphrase**; the next ones ask for it.
 
@@ -74,6 +74,11 @@ reads the history statistics (dates, durations, models, word counts and costs), 
 keys. The bubble, recording, text insertion and history options stay per phone. The phone syncs when
 you open the app, a few seconds after you change a setting or dictate, and from *Sync now*; there is
 no background schedule.
+
+Downloads keep an encrypted inbox with their saved cursor, so interrupted syncs and failed local
+writes can be retried. Settings, API keys and downloaded history are saved before the inbox is
+acknowledged. Upload batches use their actual JSON size. Updated servers show completed syncs and
+transferred counts separately from device contact; older servers remain compatible.
 
 ## Privacy
 

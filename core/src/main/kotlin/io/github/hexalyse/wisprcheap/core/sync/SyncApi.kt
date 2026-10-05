@@ -37,8 +37,17 @@ class SyncApi(private val client: OkHttpClient, server: String, private val toke
             serializer(),
         )
 
-    suspend fun push(changes: List<Change>): PushResponse =
-        call("POST", "/v1/changes", SyncJson.encodeToString(PushRequest(changes)), serializer())
+    suspend fun push(changes: List<Change>): PushResponse {
+        val response: PushResponse = call("POST", "/v1/changes", SyncJson.encodeToString(PushRequest(changes)), serializer())
+        if (response.results.size != changes.size || changes.zip(response.results).any { (c, r) -> c.kind != r.kind || c.id != r.id }) {
+            throw SyncApiException(200, "bad_response", "the server returned an incomplete or mismatched upload acknowledgement")
+        }
+        return response
+    }
+
+    suspend fun reportSync(report: SyncReportRequest) {
+        send(client, request(base, "POST", "/v1/sync-complete", SyncJson.encodeToString(report), token, null))
+    }
 
     suspend fun stats(from: String, to: String, offsetMinutes: Int): StatsResponse =
         call("GET", "/v1/stats?from=$from&to=$to&offset=$offsetMinutes", null, serializer())

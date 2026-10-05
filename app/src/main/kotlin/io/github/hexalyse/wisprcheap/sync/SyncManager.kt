@@ -30,6 +30,8 @@ import io.github.hexalyse.wisprcheap.data.SettingsRepository
 import io.github.hexalyse.wisprcheap.data.StoredSyncCredentials
 import io.github.hexalyse.wisprcheap.data.SyncCredentialStore
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
@@ -104,8 +106,8 @@ class SyncManager(
         override val history: List<HistoryEntry> get() = this@SyncManager.history().entries.value
 
         override suspend fun write(settings: Settings, keys: ApiKeys) {
-            this@SyncManager.settings.update { SyncProfile.mergeSynced(it, settings) }
-            if (keys != secrets.current) secrets.update { keys }
+            this@SyncManager.settings.updateAndSave { SyncProfile.mergeSynced(it, settings) }
+            secrets.updateAndSave { keys }
         }
 
         override suspend fun addHistory(entries: List<HistoryEntry>) = this@SyncManager.history().addAll(entries)
@@ -152,7 +154,7 @@ class SyncManager(
             atomic.finishWrite(out)
         } catch (e: Exception) {
             atomic.failWrite(out)
-            log.error("[sync] Can't save the sync state: ${e.message}")
+            throw java.io.IOException("Can't save the sync state: ${e.message}", e)
         }
     }
 
@@ -184,7 +186,7 @@ class SyncManager(
         if (connected) engine.historyDeleted(entries)
     }
 
-    /** One sync; never throws. */
+    /** One sync; cancellation propagates to its owner. */
     suspend fun run(): Result<SyncOutcome> {
         val c = credentials.current ?: return Result.failure(IllegalStateException("sync is off"))
         val dk = runCatching { DataKey.import(c.dataKey) }.getOrNull()
@@ -192,20 +194,22 @@ class SyncManager(
             _status.update { it.copy(phase = Phase.NEEDS_KEY, message = "Enter the sync passphrase.") }
             return Result.failure(NeedsKeyException("missing key"))
         }
-        retryJob?.cancel()
+        if (retryJob != currentCoroutineContext()[Job]) retryJob?.cancel()
+        retryJob = null
         lastRun = SystemClock.elapsedRealtime()
         _status.update { it.copy(phase = Phase.SYNCING) }
         val started = System.nanoTime()
         val s = settings.current.sync
         return try {
-            val out = engine.run(SyncCredentials(c.server, c.token, dk), SyncOptions(s.uploadHistory, s.downloadHistory))
+            val out = engine.run(SyncCredentials(c.server, c.token, dk, BuildConfig.VERSION_NAME), SyncOptions(s.uploadHistory, s.downloadHistory))
             failures = 0
             deviceId = out.deviceId
             val st = loadState()
             _status.update {
                 it.copy(
-                    phase = Phase.OK, server = c.server, username = st.username, deviceName = st.deviceName,
-                    lastSync = System.currentTimeMillis(), message = "", month = out.month, devices = out.devices,
+                    phase = if (out.pending == 0) Phase.OK else Phase.ERROR, server = c.server, username = st.username, deviceName = st.deviceName,
+                    lastSync = st.lastSync?.let { timestamp -> java.time.Instant.parse(timestamp).toEpochMilli() },
+                    message = if (out.pending == 0) "" else "${out.pending} changes are waiting to sync. Check the activity log.", month = out.month, devices = out.devices,
                 )
             }
             val secs = "%.1f".format(java.util.Locale.ROOT, (System.nanoTime() - started) / 1e9)
@@ -218,6 +222,7 @@ class SyncManager(
             }
             Result.success(out)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             val (phase, retry) = when (e) {
                 is SyncNetworkException -> Phase.OFFLINE to true
                 is SyncApiException -> Phase.ERROR to true

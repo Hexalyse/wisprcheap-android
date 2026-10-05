@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -31,6 +32,18 @@ class SettingsRepository(
         }
     }
 
+    /** Sync acknowledges a downloaded setting only after its file is durable. */
+    suspend fun updateAndSave(transform: (Settings) -> Settings) = withContext(Dispatchers.IO) {
+        writeLock.withLock {
+            while (true) {
+                val before = _settings.value
+                val updated = transform(before)
+                save(updated, propagate = true)
+                if (_settings.compareAndSet(before, updated)) break
+            }
+        }
+    }
+
     private fun load(): Settings {
         if (!file.exists()) return Settings()
         return try {
@@ -42,7 +55,7 @@ class SettingsRepository(
         }
     }
 
-    private fun save(settings: Settings) {
+    private fun save(settings: Settings, propagate: Boolean = false) {
         val atomic = AtomicFile(file)
         val out = atomic.startWrite()
         try {
@@ -51,6 +64,7 @@ class SettingsRepository(
         } catch (e: Exception) {
             atomic.failWrite(out)
             onError("Settings could not be saved: ${e.message}")
+            if (propagate) throw e
         }
     }
 }

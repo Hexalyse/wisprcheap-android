@@ -5,6 +5,7 @@ import io.github.hexalyse.wisprcheap.core.history.HistoryJson
 import io.github.hexalyse.wisprcheap.core.settings.ApiKeys
 import io.github.hexalyse.wisprcheap.core.settings.Settings
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -39,6 +40,9 @@ class SyncState(
     var snapshot: MutableMap<String, Snap> = mutableMapOf(),
     /** Local changes not pushed yet (encrypted). */
     var outbox: MutableList<Change> = mutableListOf(),
+    /** Fetched encrypted records, persisted atomically with the cursor before applying them. */
+    var pending: MutableList<Change> = mutableListOf(),
+    var historyInbox: MutableList<Change> = mutableListOf(),
     /** Ids of this device's history entries stored on the server. */
     var uploaded: MutableSet<String> = mutableSetOf(),
     /** This device's history entries deleted locally, to delete on the server too. */
@@ -52,6 +56,8 @@ class SyncState(
         initialized = false
         snapshot.clear()
         outbox.clear()
+        pending.clear()
+        historyInbox.clear()
         uploaded.clear()
         historyDeletes.clear()
         historyDownload = false
@@ -85,7 +91,7 @@ interface SyncHost {
     fun saveState(state: SyncState)
 }
 
-data class SyncCredentials(val server: String, val token: String, val dataKey: DataKey)
+data class SyncCredentials(val server: String, val token: String, val dataKey: DataKey, val appVersion: String = "")
 
 data class SyncOptions(val uploadHistory: Boolean = true, val downloadHistory: Boolean = false)
 
@@ -104,6 +110,7 @@ data class SyncOutcome(
     val devices: Int = 0,
     val deviceId: String = "",
     val warnings: List<String> = emptyList(),
+    val pending: Int = 0,
 ) {
     fun summary(): String {
         val parts = mutableListOf<String>()
@@ -111,6 +118,7 @@ data class SyncOutcome(
         applied.values.sum().takeIf { it > 0 }?.let { parts += "applied $it change(s) from other devices" }
         if (uploaded > 0) parts += "uploaded $uploaded history entr(ies)"
         if (downloaded > 0) parts += "added $downloaded history entr(ies) from other devices"
+        if (pending > 0) parts += "$pending change(s) waiting to sync"
         return if (parts.isEmpty()) "up to date" else parts.joinToString(", ")
     }
 
@@ -171,7 +179,7 @@ class SyncEngine(
             st.resetData()
             st.keyId = dk.keyId
         }
-        val run = Run(SyncApi(http, server, creds.token), dk, st, options)
+        val run = Run(SyncApi(http, server, creds.token), dk, st, options, creds.appVersion)
         try {
             run.run()
         } finally {
@@ -184,7 +192,7 @@ class SyncEngine(
 
     private fun hash(dk: DataKey, v: JsonElement) = dk.blindId("hash", canonicalJson(v))
 
-    private inner class Run(val api: SyncApi, val dk: DataKey, val st: SyncState, val options: SyncOptions) {
+    private inner class Run(val api: SyncApi, val dk: DataKey, val st: SyncState, val options: SyncOptions, val appVersion: String) {
         var clock = HlcClock(st.deviceId.ifEmpty { "dev_unknown" }).also { c -> Hlc.parse(st.hlc)?.let(c::observe) }
         val warnings = mutableListOf<String>()
         val applied = LinkedHashMap<String, Int>()
@@ -225,14 +233,15 @@ class SyncEngine(
 
             // 1. Pull.
             val incoming = LinkedHashMap<String, Change>()
-            val historyIn = mutableListOf<Change>()
+            st.pending.forEach { incoming[it.key] = it }
             var pulled = 0
+            var downloaded = 0
             while (true) {
                 val page = api.pull(st.cursor, PAGE, excludeHistory = !download)
                 for (c in page.changes) {
                     Hlc.parse(c.hlc)?.let(clock::observe)
                     if (c.kind == SyncProfile.HISTORY) {
-                        if (download && !c.deleted && c.device != st.deviceId) historyIn += c
+                        if (download && !c.deleted && c.device != st.deviceId) st.historyInbox += c
                         continue
                     }
                     pulled++
@@ -241,6 +250,14 @@ class SyncEngine(
                     incoming[c.key] = c
                 }
                 st.cursor = page.nextSince
+                st.pending = incoming.values.toMutableList()
+                host.saveState(st)
+                if (download) {
+                    val (added, remaining) = downloadHistory(st.historyInbox)
+                    downloaded += added
+                    st.historyInbox = remaining.toMutableList()
+                    host.saveState(st)
+                }
                 if (!page.hasMore) break
             }
             // A queued local change and a remote one on the same record: the newer wins.
@@ -252,16 +269,22 @@ class SyncEngine(
             }
 
             // 2-4. Decrypt, merge, apply.
-            apply(incoming.values.toList(), first)
+            st.pending = incoming.values.toMutableList()
+            st.pending = apply(st.pending, first).toMutableList()
 
             // 5. What the server didn't have (first sync), values normalised by the merge.
             diffLocal()
             host.saveState(st)
 
             // 6. Push.
-            val stale = mutableListOf<Change>()
+            var sawStale = false
             while (st.outbox.isNotEmpty()) {
-                val batch = st.outbox.take(PAGE)
+                val candidates = st.outbox.asSequence().filter { (it.payload?.toByteArray(Charsets.UTF_8)?.size ?: 0) <= MAX_PAYLOAD }.take(PAGE).toList()
+                if (candidates.isEmpty()) {
+                    warn("${st.outbox.size} changes are too large to upload (maximum encrypted payload: 64 KiB); they remain pending")
+                    break
+                }
+                val batch = pushBatch(candidates)
                 val resp = api.push(batch)
                 for ((sent, r) in batch.zip(resp.results)) {
                     st.outbox.removeAll { it.kind == sent.kind && it.id == sent.id && it.hlc == sent.hlc }
@@ -269,7 +292,8 @@ class SyncEngine(
                         PushStatus.APPLIED, PushStatus.EXISTS -> pushed[sent.kind] = (pushed[sent.kind] ?: 0) + 1
                         PushStatus.STALE -> r.current?.let {
                             Hlc.parse(it.hlc)?.let(clock::observe)
-                            stale += it
+                            st.pending += it
+                            sawStale = true
                         }
                         PushStatus.REJECTED -> {
                             if (r.error == "clock_skew") {
@@ -281,14 +305,16 @@ class SyncEngine(
                         }
                     }
                 }
+                host.saveState(st)
             }
-            apply(stale, false)
+            if (sawStale) {
+                st.pending = apply(st.pending, false).toMutableList()
+                host.saveState(st)
+            }
 
             // 7-8. History.
             var uploaded = 0
-            var downloaded = 0
             if (options.uploadHistory) uploaded = uploadHistory()
-            if (download) downloaded = downloadHistory(historyIn)
 
             // 9. This month, every device.
             val now = Instant.now()
@@ -302,19 +328,34 @@ class SyncEngine(
                 monthStats = stats.months.firstOrNull { it.month == month }
                 devices = stats.devices.size
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 if (e is SyncUnauthorizedException) throw e
                 warn("statistics unavailable: ${e.message}")
             }
 
             st.initialized = true
-            st.lastSync = now.toString()
-            return SyncOutcome(first, pulled, applied, pushed, uploaded, downloaded, monthStats, devices, st.deviceId, warnings)
+            val pending = st.pending.size + st.historyInbox.size + st.outbox.size
+            if (pending == 0) st.lastSync = now.toString()
+            host.saveState(st)
+            if (me.capabilities.syncReport) {
+                try {
+                    api.reportSync(SyncReportRequest(
+                        (uploaded + pushed.values.sum()).toLong(), (downloaded + applied.values.sum()).toLong(),
+                        pending.toLong(), appVersion,
+                    ))
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    warn("couldn't report the completed sync: ${e.message}")
+                }
+            }
+            return SyncOutcome(first, pulled, applied, pushed, uploaded, downloaded, monthStats, devices, st.deviceId, warnings, pending)
         }
 
         /** Compares the local profile with the snapshot; every difference is queued with a fresh HLC. */
         fun diffLocal() {
             val local = SyncProfile.profile(host.settings, host.keys, dk)
             for ((key, rec) in local.entries.sortedBy { it.value.order }) {
+                if (st.pending.any { it.key == key }) continue
                 val h = hash(dk, rec.value)
                 val snap = st.snapshot[key]
                 if (snap != null && !snap.deleted && snap.hash == h) continue
@@ -323,7 +364,7 @@ class SyncEngine(
                 st.snapshot[key] = Snap(hlc, h)
             }
             val gone = st.snapshot.filter { (k, s) ->
-                !s.deleted && k !in local && k.substringBefore('/') in setOf(SyncProfile.DICT, SyncProfile.PAIR, SyncProfile.PRICE)
+                !s.deleted && k !in local && st.pending.none { it.key == k } && k.substringBefore('/') in setOf(SyncProfile.DICT, SyncProfile.PAIR, SyncProfile.PRICE)
             }.keys
             for (key in gone) {
                 val kind = key.substringBefore('/')
@@ -334,8 +375,9 @@ class SyncEngine(
             }
         }
 
-        suspend fun apply(changes: List<Change>, first: Boolean) {
-            if (changes.isEmpty()) return
+        suspend fun apply(changes: List<Change>, first: Boolean): List<Change> {
+            if (changes.isEmpty()) return emptyList()
+            val remaining = mutableListOf<Change>()
             val sorted = changes.sortedBy { it.seq ?: Long.MAX_VALUE }
             val local0 = SyncProfile.profile(host.settings, host.keys, dk)
             val decoded = mutableListOf<Pair<Change, JsonElement?>>()
@@ -348,6 +390,7 @@ class SyncEngine(
                         dk.decryptRecord(st.userId, c.kind, c.id, payload)
                     } catch (e: SyncCryptoException) {
                         warn("can't decrypt ${c.key}: ${e.message}")
+                        remaining += c
                         continue
                     }
                 }
@@ -362,7 +405,7 @@ class SyncEngine(
                 }
                 decoded += c to value
             }
-            if (decoded.isEmpty()) return
+            if (decoded.isEmpty()) return remaining
             val result = SyncProfile.apply(host.settings, host.keys, dk, decoded.map { (c, v) -> Incoming(c.kind, c.id, v) })
             result.ignored.forEach { warn("ignored $it from another device") }
             if (result.settings != host.settings || result.keys != host.keys) host.write(result.settings, result.keys)
@@ -370,6 +413,7 @@ class SyncEngine(
             for ((c, v) in decoded) {
                 st.snapshot[c.key] = Snap(c.hlc, v?.let { hash(dk, it) } ?: "", deleted = v == null)
             }
+            return remaining
         }
 
         fun historyChange(e: HistoryEntry): Change? {
@@ -424,16 +468,19 @@ class SyncEngine(
                 size = 0
             }
             for (c in changes) {
+                val changeBytes = SyncJson.encodeToString(c).toByteArray(Charsets.UTF_8).size + 1
+                if (batch.isNotEmpty() && size + changeBytes > TARGET_PUSH_BYTES) flush()
                 batch += c
-                size += (c.payload?.length ?: 0) + 800
+                size += changeBytes
                 if (batch.size >= 200 || size > 600_000) flush()
             }
             flush()
             return uploaded
         }
 
-        suspend fun downloadHistory(changes: List<Change>): Int {
-            if (changes.isEmpty()) return 0
+        suspend fun downloadHistory(changes: List<Change>): Pair<Int, List<Change>> {
+            if (changes.isEmpty()) return 0 to emptyList()
+            val remaining = mutableListOf<Change>()
             val known = host.history.mapNotNull { it.id }.toHashSet()
             val added = mutableListOf<HistoryEntry>()
             for (c in changes) {
@@ -443,6 +490,7 @@ class SyncEngine(
                     dk.decryptRecord(st.userId, SyncProfile.HISTORY, c.id, payload)
                 } catch (e: SyncCryptoException) {
                     warn("can't decrypt history entry ${c.id}: ${e.message}")
+                    remaining += c
                     continue
                 }
                 val entry = runCatching { HistoryJson.decode(value.jsonObject) }.getOrNull() ?: continue
@@ -450,7 +498,7 @@ class SyncEngine(
                 known += c.id
             }
             if (added.isNotEmpty()) host.addHistory(added.sortedBy { it.ts })
-            return added.size
+            return added.size to remaining
         }
     }
 

@@ -51,7 +51,14 @@ data class MeResponse(
     val serverTime: String = "",
     val serverVersion: String = "",
     val keyring: Keyring? = null,
+    val capabilities: Capabilities = Capabilities(),
 )
+
+@Serializable
+data class Capabilities(val syncReport: Boolean = false)
+
+@Serializable
+data class SyncReportRequest(val uploaded: Long, val downloaded: Long, val pending: Long, val appVersion: String)
 
 @Serializable
 data class PutKeyringRequest(val keyId: String, val salt: String, val kdf: KdfParams, val wrappedKey: String)
@@ -81,6 +88,21 @@ data class ChangesResponse(val changes: List<Change>, val nextSince: Long, val h
 
 @Serializable
 data class PushRequest(val changes: List<Change>)
+
+const val TARGET_PUSH_BYTES = 768 * 1024
+
+/** Size the actual UTF-8 JSON, including escaping and envelope overhead. */
+fun pushBatch(changes: List<Change>): List<Change> {
+    var bytes = "{\"changes\":[]}".toByteArray().size
+    val batch = mutableListOf<Change>()
+    for (change in changes.take(500)) {
+        val size = SyncJson.encodeToString(change).toByteArray(Charsets.UTF_8).size + if (batch.isEmpty()) 0 else 1
+        if (batch.isNotEmpty() && bytes + size > TARGET_PUSH_BYTES) break
+        batch += change
+        bytes += size
+    }
+    return batch
+}
 
 @Serializable
 enum class PushStatus {

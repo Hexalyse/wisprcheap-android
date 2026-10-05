@@ -1,5 +1,7 @@
 package io.github.hexalyse.wisprcheap.data
 
+import android.util.AtomicFile
+
 import io.github.hexalyse.wisprcheap.core.history.HistoryEntry
 import io.github.hexalyse.wisprcheap.core.history.HistoryJson
 import io.github.hexalyse.wisprcheap.core.pipeline.HistoryStore
@@ -7,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -36,33 +37,51 @@ class HistoryRepository(
 
     override suspend fun add(entry: HistoryEntry) {
         val stamped = if (entry.device == null) entry.copy(device = deviceId()) else entry
-        _entries.update { it + stamped }
-        if (persist()) {
-            lock.withLock {
-                withContext(Dispatchers.IO) { file.appendText(HistoryJson.encodeLine(stamped) + "\n") }
+        lock.withLock {
+            if (persist()) {
+                withContext(Dispatchers.IO) {
+                    file.parentFile?.mkdirs()
+                    file.outputStreamAppend().use { stream ->
+                        stream.write((HistoryJson.encodeLine(stamped) + "\n").toByteArray())
+                        stream.fd.sync()
+                    }
+                }
             }
+            _entries.value = _entries.value + stamped
         }
     }
 
     /** Entries of other devices (sync download), merged by date. */
     suspend fun addAll(entries: List<HistoryEntry>) {
         if (entries.isEmpty()) return
-        _entries.update { (it + entries).sortedBy { e -> e.ts } }
-        if (persist()) rewrite()
+        lock.withLock {
+            val known = _entries.value.mapNotNull { it.id }.toHashSet()
+            val added = entries.filter { it.id?.let(known::add) ?: true }
+            if (added.isEmpty()) return@withLock
+            val merged = (_entries.value + added).sortedBy { e -> e.ts }
+            if (persist()) writeSnapshot(merged)
+            _entries.value = merged
+        }
     }
 
     suspend fun delete(entry: HistoryEntry) {
-        _entries.update { it - entry }
+        lock.withLock {
+            val remaining = _entries.value - entry
+            writeSnapshot(remaining)
+            _entries.value = remaining
+        }
         entry.audioFile?.let { runCatching { File(it).delete() } }
-        rewrite()
         onDeleted(listOf(entry))
     }
 
     suspend fun clear() {
-        val old = _entries.value
-        _entries.value = emptyList()
+        val old = lock.withLock {
+            val old = _entries.value
+            writeSnapshot(emptyList())
+            _entries.value = emptyList()
+            old
+        }
         old.forEach { e -> e.audioFile?.let { runCatching { File(it).delete() } } }
-        rewrite()
         onDeleted(old)
     }
 
@@ -71,18 +90,27 @@ class HistoryRepository(
         out.bufferedWriter().use { w -> _entries.value.forEach { w.write(HistoryJson.encodeLine(it)); w.write("\n") } }
     }
 
-    private suspend fun rewrite() = lock.withLock {
-        withContext(Dispatchers.IO) {
-            val tmp = File(file.parentFile, file.name + ".tmp")
-            tmp.bufferedWriter().use { w -> _entries.value.forEach { w.write(HistoryJson.encodeLine(it)); w.write("\n") } }
-            tmp.renameTo(file)
+    private fun File.outputStreamAppend() = java.io.FileOutputStream(this, true)
+
+    private suspend fun writeSnapshot(entries: List<HistoryEntry>) = withContext(Dispatchers.IO) {
+        file.parentFile?.mkdirs()
+        val atomic = AtomicFile(file)
+        val stream = atomic.startWrite()
+        try {
+            val writer = stream.bufferedWriter()
+            entries.forEach { writer.write(HistoryJson.encodeLine(it)); writer.write("\n") }
+            writer.flush()
+            atomic.finishWrite(stream)
+        } catch (e: Exception) {
+            atomic.failWrite(stream)
+            throw e
         }
     }
 
     private fun load(): List<HistoryEntry> {
         if (!file.exists()) return emptyList()
-        return file.readLines().mapNotNull { line ->
+        return AtomicFile(file).readFully().decodeToString().lineSequence().mapNotNull { line ->
             if (line.isBlank()) null else runCatching { HistoryJson.decode(Json.parseToJsonElement(line).jsonObject) }.getOrNull()
-        }
+        }.toList()
     }
 }

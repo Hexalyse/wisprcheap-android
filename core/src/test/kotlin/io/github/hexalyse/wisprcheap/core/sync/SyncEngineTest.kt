@@ -14,6 +14,8 @@ import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
 import okhttp3.OkHttpClient
+import kotlinx.serialization.json.JsonPrimitive
+import java.io.IOException
 import java.time.Instant
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -27,6 +29,11 @@ private class FakeServer : Dispatcher() {
     var keyring: Keyring? = null
     val records = linkedMapOf<String, Change>()
     var seq = 0L
+    var failPullAt: Long? = null
+    var failPush = false
+    var malformedAcknowledgements = false
+    val reports = mutableListOf<SyncReportRequest>()
+    val pushBytes = mutableListOf<Int>()
 
     fun device(name: String): String {
         val id = "dev_${name}-X"
@@ -45,7 +52,7 @@ private class FakeServer : Dispatcher() {
         val body = request.body?.utf8().orEmpty()
         return when ("${request.method} ${url.encodedPath}") {
             "GET /v1/me" -> json(
-                SyncJson.encodeToString(MeResponse(UserInfo(user, "alice"), DeviceInfo(device, device, "android"), keyring = keyring)),
+                SyncJson.encodeToString(MeResponse(UserInfo(user, "alice"), DeviceInfo(device, device, "android"), keyring = keyring, capabilities = Capabilities(syncReport = true))),
             )
             "PUT /v1/keyring" -> {
                 if (keyring != null) return json("""{"error":"keyring_exists","message":"exists"}""", 409)
@@ -55,6 +62,7 @@ private class FakeServer : Dispatcher() {
             }
             "GET /v1/changes" -> {
                 val since = url.queryParameter("since")!!.toLong()
+                if (failPullAt?.let { since >= it } == true) return json("""{"error":"temporary","message":"try again"}""", 503)
                 val limit = url.queryParameter("limit")!!.toInt()
                 val exclude = url.queryParameter("exclude") == "history"
                 val all = records.values.filter { it.seq!! > since && !(exclude && it.kind == "history") }.sortedBy { it.seq }
@@ -62,6 +70,9 @@ private class FakeServer : Dispatcher() {
                 json(SyncJson.encodeToString(ChangesResponse(page, page.lastOrNull()?.seq ?: since, all.size > limit)))
             }
             "POST /v1/changes" -> {
+                pushBytes += body.toByteArray(Charsets.UTF_8).size
+                if (body.toByteArray(Charsets.UTF_8).size > 1024 * 1024) return json("{}", 413)
+                if (failPush) return json("""{"error":"temporary","message":"try again"}""", 503)
                 val req = SyncJson.decodeFromString<PushRequest>(body)
                 val results = req.changes.map { c ->
                     val existing = records[c.key]
@@ -78,7 +89,11 @@ private class FakeServer : Dispatcher() {
                         }
                     }
                 }
-                json(SyncJson.encodeToString(PushResponse(results)))
+                json(SyncJson.encodeToString(PushResponse(if (malformedAcknowledgements) results.dropLast(1) else results)))
+            }
+            "POST /v1/sync-complete" -> {
+                reports += SyncJson.decodeFromString<SyncReportRequest>(body)
+                MockResponse.Builder().code(204).build()
             }
             "GET /v1/stats" -> {
                 val month = url.queryParameter("from")!!
@@ -95,14 +110,18 @@ private class MemoryHost(override var settings: Settings, override var keys: Api
     override var history: List<HistoryEntry> = emptyList()
     var state = SyncState()
     var writes = 0
+    var failHistory = false
+    var failWrite = false
 
     override suspend fun write(settings: Settings, keys: ApiKeys) {
+        if (failWrite) throw IOException("profile write interrupted")
         this.settings = settings
         this.keys = keys
         writes++
     }
 
     override suspend fun addHistory(entries: List<HistoryEntry>) {
+        if (failHistory) throw IOException("history write interrupted")
         history = history + entries
     }
 
@@ -138,6 +157,146 @@ class SyncEngineTest {
         words = words,
         costUsd = Costs(0.0001, 0.00001, 0.00011),
     )
+
+    private suspend fun ready(): Triple<MemoryHost, DataKey, SyncCredentials> {
+        fake.device("a")
+        val host = MemoryHost(Settings())
+        val key = DataKey.generate()
+        val creds = SyncCredentials(url, "wcs_a", key, "test-version")
+        SyncApi(http, url, "wcs_a").putKeyring(SyncEngine.keyringRequest("usr_1", key, "correct horse", fastKdf))
+        SyncEngine(http, host).run(creds, SyncOptions())
+        SyncEngine(http, host).run(creds, SyncOptions()) // Acknowledge the profile uploaded on the first run.
+        return Triple(host, key, creds)
+    }
+
+    @Test
+    fun fetchedProfileSurvivesFailureOnTheNextPage() = runTest {
+        val (host, key, creds) = ready()
+        val base = fake.seq
+        repeat(501) { index ->
+            val id = if (index == 0) "polish.model" else "unused-$index"
+            val c = Change(seq = ++fake.seq, kind = "setting", id = id, hlc = Hlc(Instant.now().toEpochMilli(), index, "dev_b-X").toString(),
+                payload = key.encryptRecord("usr_1", "setting", id, JsonPrimitive("recovered-model")), device = "dev_b-X")
+            fake.records[c.key] = c
+        }
+        fake.failPullAt = base + 500
+        assertFailsWith<SyncApiException> { SyncEngine(http, host).run(creds, SyncOptions()) }
+        assertTrue(host.state.pending.any { it.id == "polish.model" })
+        assertEquals(base + 500, host.state.cursor)
+        fake.failPullAt = null
+        SyncEngine(http, host).run(creds, SyncOptions())
+        assertEquals("recovered-model", host.settings.polish.model)
+        assertTrue(host.state.pending.isEmpty())
+        assertEquals("test-version", fake.reports.last().appVersion)
+    }
+
+    @Test
+    fun failedProfileWriteKeepsEncryptedInbox() = runTest {
+        val (host, key, creds) = ready()
+        val id = "polish.model"
+        val c = Change(seq = ++fake.seq, kind = "setting", id = id, hlc = Hlc(Instant.now().toEpochMilli(), 0, "dev_b-X").toString(),
+            payload = key.encryptRecord("usr_1", "setting", id, JsonPrimitive("after-retry")), device = "dev_b-X")
+        fake.records[c.key] = c
+        host.failWrite = true
+        assertFailsWith<IOException> { SyncEngine(http, host).run(creds, SyncOptions()) }
+        assertTrue(host.state.pending.any { it.id == id })
+        host.failWrite = false
+        SyncEngine(http, host).run(creds, SyncOptions())
+        assertEquals("after-retry", host.settings.polish.model)
+        assertTrue(host.state.pending.isEmpty())
+    }
+
+    @Test
+    fun failedHistoryWriteAndLaterUploadCannotLoseOrDuplicateDownloads() = runTest {
+        val (host, key, creds) = ready()
+        val remote = entry(4, "dev_b-X", "8fe1cf0f-3322-4a1d-817e-43b70206418e")
+        val id = remote.id!!
+        val json = io.github.hexalyse.wisprcheap.core.history.HistoryJson.encode(remote)
+        val c = Change(seq = ++fake.seq, kind = "history", id = id, hlc = Hlc(Instant.now().toEpochMilli(), 0, "dev_b-X").toString(),
+            payload = key.encryptRecord("usr_1", "history", id, json), device = "dev_b-X", stats = HistoryStats.fromEntry(json))
+        fake.records[c.key] = c
+        host.failHistory = true
+        assertFailsWith<IOException> { SyncEngine(http, host).run(creds, SyncOptions(downloadHistory = true)) }
+        assertTrue(host.state.historyInbox.any { it.id == id })
+        host.failHistory = false
+        host.history = listOf(entry(2))
+        fake.failPush = true
+        assertFailsWith<SyncApiException> { SyncEngine(http, host).run(creds, SyncOptions(downloadHistory = true)) }
+        assertEquals(1, host.history.count { it.id == id })
+        fake.failPush = false
+        SyncEngine(http, host).run(creds, SyncOptions(downloadHistory = true))
+        assertEquals(1, host.history.count { it.id == id })
+        assertTrue(host.state.historyInbox.isEmpty())
+    }
+
+    @Test
+    fun malformedAcknowledgementsLeaveTheOutboxRetryable() = runTest {
+        val (host, _, creds) = ready()
+        host.settings = host.settings.copy(polish = host.settings.polish.copy(model = "changed"))
+        fake.malformedAcknowledgements = true
+        assertFailsWith<SyncApiException> { SyncEngine(http, host).run(creds, SyncOptions()) }
+        assertTrue(host.state.outbox.any { it.id == "polish.model" })
+        fake.malformedAcknowledgements = false
+        SyncEngine(http, host).run(creds, SyncOptions())
+        assertTrue(host.state.outbox.isEmpty())
+    }
+
+    @Test
+    fun undecryptableChangeStaysPendingUntilReplaced() = runTest {
+        val (host, key, creds) = ready()
+        val previousSuccess = "2000-01-01T00:00:00Z"
+        host.state.lastSync = previousSuccess
+        val id = "polish.model"
+        val broken = Change(seq = ++fake.seq, kind = "setting", id = id,
+            hlc = Hlc(Instant.now().toEpochMilli(), 0, "dev_b-X").toString(),
+            payload = DataKey.generate().encryptRecord("usr_1", "setting", id, JsonPrimitive("repaired")), device = "dev_b-X")
+        fake.records[broken.key] = broken
+        val outcome = SyncEngine(http, host).run(creds, SyncOptions())
+        assertEquals(1, outcome.pending)
+        assertTrue(outcome.summary().contains("waiting to sync"))
+        assertEquals(previousSuccess, host.state.lastSync)
+        assertEquals(1L, fake.reports.last().pending)
+        assertTrue(host.state.outbox.none { it.id == id })
+
+        fake.records[broken.key] = broken.copy(seq = ++fake.seq,
+            hlc = Hlc(Instant.now().toEpochMilli(), 1, "dev_b-X").toString(),
+            payload = key.encryptRecord("usr_1", "setting", id, JsonPrimitive("repaired")))
+        val repaired = SyncEngine(http, host).run(creds, SyncOptions())
+        assertEquals(0, repaired.pending)
+        assertEquals("repaired", host.settings.polish.model)
+        assertTrue(host.state.lastSync != previousSuccess)
+        assertEquals(0L, fake.reports.last().pending)
+    }
+
+    @Test
+    fun oversizedOutboxDoesNotBlockOtherUploadsOrClaimSuccess() = runTest {
+        val (host, _, creds) = ready()
+        val previousSuccess = "2000-01-01T00:00:00Z"
+        host.state.lastSync = previousSuccess
+        host.state.outbox += Change(kind = "setting", id = "oversized", hlc = "0", payload = "x".repeat(70_000))
+        host.settings = host.settings.copy(polish = host.settings.polish.copy(model = "still-uploaded"))
+        val outcome = SyncEngine(http, host).run(creds, SyncOptions())
+        assertTrue((outcome.pushed["setting"] ?: 0) > 0)
+        assertEquals(listOf("oversized"), host.state.outbox.map { it.id })
+        assertEquals(1, outcome.pending)
+        assertEquals(previousSuccess, host.state.lastSync)
+        assertEquals(1L, fake.reports.last().pending)
+        assertTrue(fake.pushBytes.all { it <= TARGET_PUSH_BYTES })
+    }
+
+    @Test
+    fun byteBatchesIncludeEscapingAndUtf8() {
+        var remaining = (0..30).map { Change(kind = "setting", id = "$it", hlc = "0", payload = "\"é\\".repeat(10_000)) }
+        var batches = 0
+        while (remaining.isNotEmpty()) {
+            val batch = pushBatch(remaining)
+            assertTrue(batch.isNotEmpty())
+            assertTrue(SyncJson.encodeToString(PushRequest(batch)).toByteArray(Charsets.UTF_8).size <= TARGET_PUSH_BYTES)
+            remaining = remaining.drop(batch.size)
+            batches++
+        }
+        assertTrue(batches > 1)
+    }
 
     @Test
     fun twoPhonesConverge() = runTest {

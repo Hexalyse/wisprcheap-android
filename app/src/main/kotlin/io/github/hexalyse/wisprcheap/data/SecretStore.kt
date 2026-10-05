@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -42,6 +43,18 @@ class SecretStore(
         }
     }
 
+    /** Persist before publishing, so a failed sync write can be retried from its inbox. */
+    suspend fun updateAndSave(transform: (ApiKeys) -> ApiKeys) = withContext(Dispatchers.IO) {
+        writeLock.withLock {
+            while (true) {
+                val before = _keys.value
+                val updated = transform(before)
+                save(updated, propagate = true)
+                if (_keys.compareAndSet(before, updated)) break
+            }
+        }
+    }
+
     private fun secretKey(): SecretKey {
         val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         (ks.getKey(ALIAS, null) as? SecretKey)?.let { return it }
@@ -56,7 +69,7 @@ class SecretStore(
         return generator.generateKey()
     }
 
-    private fun save(keys: ApiKeys) {
+    private fun save(keys: ApiKeys, propagate: Boolean = false) {
         try {
             val json = JSONObject()
                 .put("elevenlabs", keys.elevenlabs)
@@ -82,6 +95,7 @@ class SecretStore(
             }
         } catch (e: Exception) {
             onError("API keys could not be saved: ${e.javaClass.simpleName}: ${e.message}")
+            if (propagate) throw e
         }
     }
 
