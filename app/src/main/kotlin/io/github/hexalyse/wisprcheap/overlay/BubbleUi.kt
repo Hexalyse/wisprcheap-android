@@ -208,7 +208,8 @@ private fun Bubble(ui: OverlayState) {
                 CircularProgressIndicator(Modifier.size(size * 0.5f), color = cs.primary, strokeWidth = 3.dp)
             } else {
                 if (look.usesMicIcon()) {
-                    Icon(painterResource(R.drawable.ic_bubble_mic), contentDescription = null, tint = fg, modifier = Modifier.size(size * 0.6f))
+                    Icon(painterResource(R.drawable.ic_bubble_fill), contentDescription = null, tint = fg, modifier = Modifier.size(size * 0.6f))
+                    Icon(painterResource(R.drawable.ic_bubble_mic), contentDescription = null, tint = bg, modifier = Modifier.size(size * 0.6f))
                 } else {
                     Icon(iconFor(look), contentDescription = null, tint = fg, modifier = Modifier.size(size * 0.52f))
                 }
