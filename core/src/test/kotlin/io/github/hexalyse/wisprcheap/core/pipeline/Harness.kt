@@ -55,10 +55,10 @@ class Harness : AutoCloseable {
         Settings(
             transcription = TranscriptionSettings(
                 timeoutMs = 2_000,
-                elevenlabs = ElevenLabsSettings(baseUrl = url),
+                elevenlabs = ElevenLabsSettings(baseUrl = url, noVerbatim = false),
                 openai = OpenAiTranscriptionSettings(baseUrl = url),
             ),
-            polish = PolishSettings(baseUrl = url, timeoutMs = 2_000),
+            polish = PolishSettings(enabled = true, baseUrl = url, timeoutMs = 2_000),
         ),
     )
 

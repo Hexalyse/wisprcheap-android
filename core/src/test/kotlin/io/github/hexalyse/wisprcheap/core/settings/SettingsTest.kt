@@ -84,7 +84,7 @@ class SettingsTest {
         val issues = Validation.issues(Settings(translation = TranslationSettings(pairs = listOf(TranslationPairSetting(to = "en")))), ApiKeys())
         val paths = issues.map { it.path }
         assertEquals(
-            listOf("transcription.elevenlabs.apiKey", "polish.apiKey", "command.apiKey", "translation.apiKey"),
+            listOf("transcription.elevenlabs.apiKey", "command.apiKey", "translation.apiKey"),
             paths,
         )
         assertTrue(issues.first().blocking)

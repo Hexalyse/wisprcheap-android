@@ -71,7 +71,7 @@ data class ElevenLabsSettings(
     /** Send the dictionary as Scribe keyterms (+$0.05/h). */
     val keyterms: Boolean = true,
     /** Let Scribe remove filler words itself. */
-    val noVerbatim: Boolean = false,
+    val noVerbatim: Boolean = true,
 )
 
 @Serializable
@@ -84,7 +84,7 @@ data class OpenAiTranscriptionSettings(
 
 @Serializable
 data class PolishSettings(
-    val enabled: Boolean = true,
+    val enabled: Boolean = false,
     val baseUrl: String = OPENAI_BASE_URL,
     val model: String = "gpt-6-luna",
     /** null = the field is omitted from the request. */
