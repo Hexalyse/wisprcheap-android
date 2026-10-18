@@ -4,11 +4,11 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-<!-- Speech bubble with a microphone cut-out. -->
-    <group android:scaleX="0.85" android:scaleY="0.85" android:pivotX="54" android:pivotY="54">
-        <path android:fillColor="#E5484D" android:pathData="M26,32h56a8,8 0 0,1 8,8v28a8,8 0 0,1 -8,8H58L42,90V76H26a8,8 0 0,1 -8,-8V40a8,8 0 0,1 8,-8z" />
-        <group android:scaleX="1.5" android:scaleY="1.5" android:translateX="36" android:translateY="34">
-            <path android:fillColor="#26262B" android:pathData="M12,14c1.66,0 2.99,-1.34 2.99,-3L15,5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6c0,1.66 1.34,3 3,3zM17.3,11c0,3 -2.54,5.1 -5.3,5.1S6.7,14 6.7,11L5,11c0,3.41 2.72,6.23 6,6.72L11,21h2v-3.28c3.28,-0.48 6,-3.3 6,-6.72h-1.7z" />
-        </group>
+    <group android:scaleX="0.9" android:scaleY="0.9" android:pivotX="54" android:pivotY="54">
+        <path android:fillColor="#E5484D" android:strokeColor="#E5484D" android:strokeWidth="3" android:strokeLineCap="round" android:strokeLineJoin="round"  android:pathData="M34.5,69.5 L27.5,82 Q26.5,86 31,84.2 L54,75.9 A33,27 0 1,0 34.5,69.5 z" />
+        <path android:fillColor="#26262B"  android:pathData="M56,31 a6,6 0 0,1 6,6 v11 a6,6 0 0,1 -12,0 v-11 a6,6 0 0,1 6,-6 z" />
+        <path android:strokeColor="#26262B" android:strokeWidth="3.2" android:strokeLineCap="round" android:strokeLineJoin="round"  android:pathData="M43.5,45 v1 a12.5,12.5 0 0,0 25,0 v-1" />
+        <path android:strokeColor="#26262B" android:strokeWidth="3.2" android:strokeLineCap="round" android:strokeLineJoin="round"  android:pathData="M56,59 v6" />
+        <path android:strokeColor="#26262B" android:strokeWidth="3.2" android:strokeLineCap="round" android:strokeLineJoin="round"  android:pathData="M49.5,65.5 h13" />
     </group>
 </vector>

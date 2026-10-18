@@ -62,6 +62,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
+import io.github.hexalyse.wisprcheap.R
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -117,6 +119,11 @@ fun OverlayContent(ui: OverlayState, onToolbar: (ToolbarButton) -> Unit, onToolb
         }
         OverlayShape.BUBBLE -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Bubble(ui) }
     }
+}
+
+private fun BubbleLook.usesMicIcon() = when (this) {
+    BubbleLook.COMMAND_ZONE, BubbleLook.CANCEL_ZONE, BubbleLook.DONE, BubbleLook.COPIED, BubbleLook.ERROR, BubbleLook.DISCARDED -> false
+    else -> true
 }
 
 private fun iconFor(look: BubbleLook): ImageVector = when (look) {
@@ -200,7 +207,11 @@ private fun Bubble(ui: OverlayState) {
             if (look == BubbleLook.PROCESSING) {
                 CircularProgressIndicator(Modifier.size(size * 0.5f), color = cs.primary, strokeWidth = 3.dp)
             } else {
-                Icon(iconFor(look), contentDescription = null, tint = fg, modifier = Modifier.size(size * 0.52f))
+                if (look.usesMicIcon()) {
+                    Icon(painterResource(R.drawable.ic_bubble_mic), contentDescription = null, tint = fg, modifier = Modifier.size(size * 0.6f))
+                } else {
+                    Icon(iconFor(look), contentDescription = null, tint = fg, modifier = Modifier.size(size * 0.52f))
+                }
             }
         }
         val badge = ui.translationBadge
