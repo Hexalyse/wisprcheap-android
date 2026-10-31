@@ -1,5 +1,6 @@
 package io.github.hexalyse.wisprcheap.core.sync
 
+import io.github.hexalyse.wisprcheap.core.http.Http
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.serialization.KSerializer
@@ -67,6 +68,7 @@ class SyncApi(private val client: OkHttpClient, server: String, private val toke
 
     companion object {
         private val JSON_TYPE = "application/json".toMediaType()
+        private const val MAX_RESPONSE_BYTES = 2L * 1024 * 1024
 
         /** `https://sync.example.com` from what the user typed (scheme added, trailing `/` removed). */
         fun normalizeServer(url: String): String {
@@ -92,7 +94,7 @@ class SyncApi(private val client: OkHttpClient, server: String, private val toke
                 .build()
 
         private suspend fun send(client: OkHttpClient, request: Request): String = runInterruptible(Dispatchers.IO) {
-            val call = client.newCall(request)
+            val call = Http.noRedirects(client).newCall(request)
             call.timeout().timeout(60, TimeUnit.SECONDS)
             val response = try {
                 call.execute()
@@ -101,7 +103,12 @@ class SyncApi(private val client: OkHttpClient, server: String, private val toke
             }
             response.use { r ->
                 val text = try {
-                    r.body.string()
+                    val source = r.body.source()
+                    if (r.body.contentLength() > MAX_RESPONSE_BYTES ||
+                        (source.request(MAX_RESPONSE_BYTES + 1) && source.buffer.size > MAX_RESPONSE_BYTES)) {
+                        throw SyncApiException(r.code, "response_too_large", "the sync server response exceeds 2 MiB")
+                    }
+                    source.readUtf8()
                 } catch (e: IOException) {
                     throw SyncNetworkException("can't reach the server: ${e.message ?: e.javaClass.simpleName}", e)
                 }
