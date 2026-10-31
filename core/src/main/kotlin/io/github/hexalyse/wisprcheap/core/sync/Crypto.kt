@@ -49,7 +49,14 @@ class WrongPassphraseException : SyncCryptoException("wrong sync passphrase")
 class DecryptException : SyncCryptoException("could not decrypt the data (wrong key or damaged data)")
 
 @Serializable
-data class KdfParams(val alg: String = "argon2id", val m: Int = 65_536, val t: Int = 3, val p: Int = 1)
+data class KdfParams(val alg: String = "argon2id", val m: Int = 65_536, val t: Int = 3, val p: Int = 1) {
+    /** Check untrusted keyring parameters before Bouncy Castle allocates Argon2 memory. */
+    fun validate() {
+        if (alg != "argon2id" || p !in 1..8 || t !in 1..10 || m < 8 * p || m > 65_536) {
+            throw SyncCryptoException("unsupported Argon2 parameters (maximum 64 MiB, 10 iterations, 8 lanes)")
+        }
+    }
+}
 
 /** Stable JSON text: object keys sorted (like the desktop's serde_json), no spaces. */
 fun canonicalJson(element: JsonElement): String = canonical(element).toString()
@@ -71,7 +78,8 @@ object SyncCrypto {
 
     /** PK = Argon2id(NFC(passphrase), salt) → 32 bytes. */
     fun derivePassphraseKey(passphrase: String, salt: ByteArray, params: KdfParams): ByteArray {
-        if (params.alg != "argon2id") throw SyncCryptoException("unsupported key derivation ${params.alg}")
+        params.validate()
+        if (salt.size != 16) throw SyncCryptoException("the keyring salt must be 16 bytes")
         val normalized = Normalizer.normalize(passphrase, Normalizer.Form.NFC)
         val generator = Argon2BytesGenerator()
         generator.init(

@@ -93,6 +93,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -105,4 +106,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "WisprCheap ${GITHUB_REF_NAME#v}" \
-            --generate-notes
+            --notes-file "docs/releases/$GITHUB_REF_NAME.md"

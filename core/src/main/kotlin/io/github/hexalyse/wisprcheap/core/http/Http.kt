@@ -33,6 +33,8 @@ object Http {
      * transcription of a long recording isn't cut by a read timeout.
      */
     fun client(userAgent: String): OkHttpClient = OkHttpClient.Builder()
+        .followRedirects(false)
+        .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
@@ -41,6 +43,13 @@ object Http {
         }
         .build()
 
+    /** Keep API keys, request bodies and pairing codes at the configured endpoint. */
+    fun noRedirects(client: OkHttpClient): OkHttpClient =
+        if (!client.followRedirects && !client.followSslRedirects) client else client.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
     /**
      * Sends [request] with an overall [timeoutMs] and returns the response body as text.
      * Non-2xx → [HttpStatusException] ("$label: HTTP 401 Unauthorized: <body>"); no response → [NetworkException].
@@ -48,7 +57,7 @@ object Http {
     suspend fun fetch(client: OkHttpClient, request: Request, timeoutMs: Long, label: String): String =
         withContext(Dispatchers.IO) {
             val response = try {
-                client.newCall(request).also { it.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS) }.await()
+                noRedirects(client).newCall(request).also { it.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS) }.await()
             } catch (e: IOException) {
                 throw networkError(e)
             }
