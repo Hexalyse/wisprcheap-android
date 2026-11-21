@@ -8,6 +8,7 @@ import io.github.hexalyse.wisprcheap.core.history.HistoryEntry
 import io.github.hexalyse.wisprcheap.core.settings.ApiKeys
 import io.github.hexalyse.wisprcheap.core.settings.Settings
 import io.github.hexalyse.wisprcheap.core.sync.DataKey
+import io.github.hexalyse.wisprcheap.core.sync.MeResponse
 import io.github.hexalyse.wisprcheap.core.sync.MonthStats
 import io.github.hexalyse.wisprcheap.core.sync.NeedsKeyException
 import io.github.hexalyse.wisprcheap.core.sync.PairRequest
@@ -22,19 +23,19 @@ import io.github.hexalyse.wisprcheap.core.sync.SyncOutcome
 import io.github.hexalyse.wisprcheap.core.sync.SyncProfile
 import io.github.hexalyse.wisprcheap.core.sync.SyncState
 import io.github.hexalyse.wisprcheap.core.sync.SyncUnauthorizedException
-import io.github.hexalyse.wisprcheap.core.sync.MeResponse
 import io.github.hexalyse.wisprcheap.data.HistoryRepository
 import io.github.hexalyse.wisprcheap.data.LogStore
 import io.github.hexalyse.wisprcheap.data.SecretStore
 import io.github.hexalyse.wisprcheap.data.SettingsRepository
 import io.github.hexalyse.wisprcheap.data.StoredSyncCredentials
 import io.github.hexalyse.wisprcheap.data.SyncCredentialStore
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,6 +46,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.File
@@ -103,7 +106,8 @@ class SyncManager(
     private val host = object : SyncHost {
         override val settings: Settings get() = this@SyncManager.settings.current
         override val keys: ApiKeys get() = secrets.current
-        override val history: List<HistoryEntry> get() = this@SyncManager.history().entries.value
+        // Only persisted entries are eligible for upload; session-only entries never leave the phone.
+        override val history: List<HistoryEntry> get() = this@SyncManager.history().persistedEntries
 
         override suspend fun write(settings: Settings, keys: ApiKeys) {
             this@SyncManager.settings.updateAndSave { SyncProfile.mergeSynced(it, settings) }
@@ -118,8 +122,14 @@ class SyncManager(
     }
 
     private val engine = SyncEngine(http, host) { log.info(it) }
+    private val runLock = Mutex()
+    private val stateLock = Any()
     private var failures = 0
     private var retryJob: Job? = null
+    private var activeSyncJob: Job? = null
+
+    @Volatile
+    private var generation = 0L
 
     /** `elapsedRealtime` when the last run started (limits the syncs on app open). */
     @Volatile
@@ -186,65 +196,94 @@ class SyncManager(
         if (connected) engine.historyDeleted(entries)
     }
 
-    /** One sync; cancellation propagates to its owner. */
+    /** One sync; serialised and cancellation-safe across disconnects. */
     suspend fun run(): Result<SyncOutcome> {
-        val c = credentials.current ?: return Result.failure(IllegalStateException("sync is off"))
-        val dk = runCatching { DataKey.import(c.dataKey) }.getOrNull()
-        if (dk == null) {
-            _status.update { it.copy(phase = Phase.NEEDS_KEY, message = "Enter the sync passphrase.") }
-            return Result.failure(NeedsKeyException("missing key"))
+        val gen = generation
+        val myJob = currentCoroutineContext()[Job]
+        synchronized(stateLock) {
+            if (retryJob != myJob) {
+                retryJob?.cancel()
+                retryJob = null
+            }
         }
-        if (retryJob != currentCoroutineContext()[Job]) retryJob?.cancel()
-        retryJob = null
-        lastRun = SystemClock.elapsedRealtime()
-        _status.update { it.copy(phase = Phase.SYNCING) }
-        val started = System.nanoTime()
-        val s = settings.current.sync
-        return try {
-            val out = engine.run(SyncCredentials(c.server, c.token, dk, BuildConfig.VERSION_NAME), SyncOptions(s.uploadHistory, s.downloadHistory))
-            failures = 0
-            deviceId = out.deviceId
-            val st = loadState()
-            _status.update {
-                it.copy(
-                    phase = if (out.pending == 0) Phase.OK else Phase.ERROR, server = c.server, username = st.username, deviceName = st.deviceName,
-                    lastSync = st.lastSync?.let { timestamp -> java.time.Instant.parse(timestamp).toEpochMilli() },
-                    message = if (out.pending == 0) "" else "${out.pending} changes are waiting to sync. Check the activity log.", month = out.month, devices = out.devices,
-                )
+        return runLock.withLock {
+            if (gen != generation) return@withLock Result.failure(CancellationException("sync session changed"))
+            val c = credentials.current ?: return@withLock Result.failure(IllegalStateException("sync is off"))
+            val dk = runCatching { DataKey.import(c.dataKey) }.getOrNull()
+            if (dk == null) {
+                _status.update { it.copy(phase = Phase.NEEDS_KEY, message = "Enter the sync passphrase.") }
+                return@withLock Result.failure(NeedsKeyException("missing key"))
             }
-            val secs = "%.1f".format(java.util.Locale.ROOT, (System.nanoTime() - started) / 1e9)
-            if (out.first) {
-                val applied = SyncOutcome.describe(out.applied).ifEmpty { null }?.let { "$it updated from the server" }
-                val pushed = SyncOutcome.describe(out.pushed).ifEmpty { null }?.let { "$it uploaded" }
-                log.info("[sync] First sync done: ${listOfNotNull(applied, pushed).joinToString(", ").ifEmpty { "nothing to merge" }} ($secs s).")
-            } else if (out.summary() != "up to date") {
-                log.info("[sync] ${out.summary()} ($secs s).")
-            }
-            Result.success(out)
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            val (phase, retry) = when (e) {
-                is SyncNetworkException -> Phase.OFFLINE to true
-                is SyncApiException -> Phase.ERROR to true
-                is SyncUnauthorizedException -> Phase.DISCONNECTED to false
-                is NeedsKeyException -> Phase.NEEDS_KEY to false
-                else -> Phase.ERROR to false
-            }
-            val message = e.message ?: e.javaClass.simpleName
-            if (retry) {
-                failures++
-                val wait = minOf(30_000L shl minOf(failures - 1, 10), 30 * 60_000L)
-                val waitText = if (wait < 90_000) "${wait / 1000} s" else "${wait / 60_000} min"
-                log.error("[sync] $message; retrying in $waitText")
-                retryJob = scope.launch {
-                    delay(wait)
-                    run()
+            synchronized(stateLock) {
+                activeSyncJob = myJob
+                if (retryJob != myJob) {
+                    retryJob?.cancel()
+                    retryJob = null
                 }
-            } else {
-                log.error("[sync] $message")
             }
-            _status.update { it.copy(phase = phase, message = message) }
-            Result.failure(e)
+            lastRun = SystemClock.elapsedRealtime()
+            _status.update { it.copy(phase = Phase.SYNCING) }
+            val started = System.nanoTime()
+            val s = settings.current.sync
+            try {
+                val out = engine.run(SyncCredentials(c.server, c.token, dk, BuildConfig.VERSION_NAME), SyncOptions(s.uploadHistory, s.downloadHistory))
+                if (gen != generation) return@withLock Result.failure(CancellationException("sync session changed"))
+                synchronized(stateLock) { failures = 0 }
+                deviceId = out.deviceId
+                val st = loadState()
+                _status.update {
+                    it.copy(
+                        phase = if (out.pending == 0) Phase.OK else Phase.ERROR, server = c.server, username = st.username, deviceName = st.deviceName,
+                        lastSync = st.lastSync?.let { timestamp -> java.time.Instant.parse(timestamp).toEpochMilli() },
+                        message = if (out.pending == 0) "" else "${out.pending} changes are waiting to sync. Check the activity log.", month = out.month, devices = out.devices,
+                    )
+                }
+                val secs = "%.1f".format(java.util.Locale.ROOT, (System.nanoTime() - started) / 1e9)
+                if (out.first) {
+                    val applied = SyncOutcome.describe(out.applied).ifEmpty { null }?.let { "$it updated from the server" }
+                    val pushed = SyncOutcome.describe(out.pushed).ifEmpty { null }?.let { "$it uploaded" }
+                    log.info("[sync] First sync done: ${listOfNotNull(applied, pushed).joinToString(", ").ifEmpty { "nothing to merge" }} ($secs s).")
+                } else if (out.summary() != "up to date") {
+                    log.info("[sync] ${out.summary()} ($secs s).")
+                }
+                Result.success(out)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (gen != generation) return@withLock Result.failure(CancellationException("sync session changed"))
+                val (phase, retry) = when (e) {
+                    is SyncNetworkException -> Phase.OFFLINE to true
+                    is SyncApiException -> Phase.ERROR to true
+                    is SyncUnauthorizedException -> Phase.DISCONNECTED to false
+                    is NeedsKeyException -> Phase.NEEDS_KEY to false
+                    else -> Phase.ERROR to false
+                }
+                val message = e.message ?: e.javaClass.simpleName
+                if (retry) {
+                    val wait = synchronized(stateLock) {
+                        failures++
+                        minOf(30_000L shl minOf(failures - 1, 10), 30 * 60_000L)
+                    }
+                    val waitText = if (wait < 90_000) "${wait / 1000} s" else "${wait / 60_000} min"
+                    log.error("[sync] $message; retrying in $waitText")
+                    synchronized(stateLock) {
+                        if (gen == generation) {
+                            retryJob?.cancel()
+                            retryJob = scope.launch {
+                                delay(wait)
+                                run()
+                            }
+                        }
+                    }
+                } else {
+                    log.error("[sync] $message")
+                }
+                if (gen == generation) _status.update { it.copy(phase = phase, message = message) }
+                Result.failure(e)
+            } finally {
+                synchronized(stateLock) {
+                    if (activeSyncJob == myJob) activeSyncJob = null
+                }
+            }
         }
     }
 
@@ -265,16 +304,24 @@ class SyncManager(
     suspend fun finishPairing(p: PendingPairing, passphrase: String): Result<SyncOutcome> {
         val api = SyncApi(http, p.server, p.token)
         val dk = setupKey(api, p.me, passphrase)
-        saveState(
-            SyncState(
-                server = p.server, userId = p.me.user.id, username = p.me.user.username,
-                deviceId = p.me.device.id, deviceName = p.me.device.name, keyId = dk.keyId,
-            ),
-        )
-        credentials.save(StoredSyncCredentials(p.server, p.token, dk.export()))
-        deviceId = p.me.device.id
-        _status.value = Status(Phase.SYNCING, p.server, p.me.user.username, p.me.device.name)
-        log.info("[sync] Connected to ${p.server} as \"${p.me.device.name}\".")
+        runLock.withLock {
+            generation++
+            synchronized(stateLock) {
+                retryJob?.cancel()
+                retryJob = null
+                failures = 0
+            }
+            saveState(
+                SyncState(
+                    server = p.server, userId = p.me.user.id, username = p.me.user.username,
+                    deviceId = p.me.device.id, deviceName = p.me.device.name, keyId = dk.keyId,
+                ),
+            )
+            credentials.save(StoredSyncCredentials(p.server, p.token, dk.export()))
+            deviceId = p.me.device.id
+            _status.value = Status(Phase.SYNCING, p.server, p.me.user.username, p.me.device.name)
+            log.info("[sync] Connected to ${p.server} as \"${p.me.device.name}\".")
+        }
         return run()
     }
 
@@ -327,29 +374,45 @@ class SyncManager(
 
     suspend fun rename(name: String) {
         val c = credentials.current ?: return
-        SyncApi(http, c.server, c.token).rename(name.trim())
-        val st = loadState()
-        st.deviceName = name.trim()
-        saveState(st)
-        _status.update { it.copy(deviceName = name.trim()) }
+        val trimmed = name.trim()
+        SyncApi(http, c.server, c.token).rename(trimmed)
+        runLock.withLock {
+            val st = loadState()
+            st.deviceName = trimmed
+            saveState(st)
+            _status.update { it.copy(deviceName = trimmed) }
+        }
     }
 
     /** Revokes this phone's token; settings, dictionary and history stay. */
     suspend fun disconnect() {
         val c = credentials.current ?: return
-        try {
-            SyncApi(http, c.server, c.token).unpair()
-        } catch (e: SyncUnauthorizedException) {
-            // already revoked
-        } catch (e: Exception) {
-            log.error("[sync] Couldn't tell the server (${e.message}); remove the device from its web page.")
+        generation++
+        val (inFlight, pendingRetry) = synchronized(stateLock) {
+            val a = activeSyncJob
+            val r = retryJob
+            retryJob = null
+            failures = 0
+            a to r
         }
-        credentials.save(null)
-        stateFile.delete()
-        deviceId = null
-        retryJob?.cancel()
-        _status.value = Status()
-        log.info("[sync] Disconnected from ${c.server}.")
+        pendingRetry?.cancel()
+        if (inFlight != null && inFlight != currentCoroutineContext()[Job]) {
+            runCatching { inFlight.cancelAndJoin() }
+        }
+        runLock.withLock {
+            try {
+                SyncApi(http, c.server, c.token).unpair()
+            } catch (e: SyncUnauthorizedException) {
+                // already revoked
+            } catch (e: Exception) {
+                log.error("[sync] Couldn't tell the server (${e.message}); remove the device from its web page.")
+            }
+            credentials.save(null)
+            stateFile.delete()
+            deviceId = null
+            _status.value = Status()
+            log.info("[sync] Disconnected from ${c.server}.")
+        }
     }
 
     companion object {

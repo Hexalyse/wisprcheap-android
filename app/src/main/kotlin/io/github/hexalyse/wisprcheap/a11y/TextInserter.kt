@@ -66,13 +66,17 @@ class TextInserter(private val service: WisprAccessibilityService, private val g
         }
         val pkg = targetPackage(node)
         val selection = req.selection
-        if (req.kind == DeliveryKind.COMMAND && selection != null) return replaceSelection(selection, req.text, ic, node)
+        if (req.kind == DeliveryKind.COMMAND && selection != null) {
+            return replaceSelection(selection, req.text, ic, node, settings.output.insertMethod, settings.output.perApp[pkg])
+        }
 
         val text = if (req.kind == DeliveryKind.DICTATION) spaced(req, ic, node) else req.text
         val methods = order(settings.output.insertMethod, settings.output.perApp[pkg])
         val nodeLengthBefore = node?.let { if (it.isShowingHintText) 0 else it.text?.length ?: 0 }
         for ((i, method) in methods.withIndex()) {
-            if (i > 0 && alreadyThere(text, node, nodeLengthBefore)) return success(method, pkg, methods.first(), settings.output.insertMethod)
+            if (i > 0 && alreadyThere(text, node, nodeLengthBefore)) {
+                return success(methods[i - 1], pkg, methods.first(), settings.output.insertMethod)
+            }
             val ok = runCatching {
                 when (method) {
                     InsertMethod.INPUT_CONNECTION -> viaInputConnection(text, ic)
@@ -235,49 +239,81 @@ class TextInserter(private val service: WisprAccessibilityService, private val g
         text: String,
         ic: InputMethod.AccessibilityInputConnection?,
         node: AccessibilityNodeInfo?,
+        configured: InsertMethod,
+        learned: InsertMethod?,
     ): DeliveryResult {
-        if (ic != null) {
-            val st = runCatching { ic.getSurroundingText(0, 0, 0) }.getOrNull()
-            if (st != null) {
-                val current = st.text.subSequence(
-                    st.selectionStart.coerceIn(0, st.text.length),
-                    st.selectionEnd.coerceIn(st.selectionStart.coerceIn(0, st.text.length), st.text.length),
-                ).toString()
-                val selectedAgain = current == sel.text || run {
-                    val (prevStart, prevEnd) = (st.offset + st.selectionStart) to (st.offset + st.selectionEnd)
-                    ic.setSelection(sel.start, sel.end)
-                    val check = runCatching { ic.getSurroundingText(0, 0, 0) }.getOrNull()
-                    val ok = check != null && check.text.subSequence(
-                        check.selectionStart.coerceIn(0, check.text.length),
-                        check.selectionEnd.coerceIn(check.selectionStart.coerceIn(0, check.text.length), check.text.length),
-                    ).toString() == sel.text
-                    if (!ok) ic.setSelection(prevStart, prevEnd)
-                    ok
-                }
-                if (selectedAgain) {
-                    ic.commitText(text, 1, null)
-                    return DeliveryResult(Delivered.INSERTED, "inputConnection")
-                }
+        if (configured == InsertMethod.CLIPBOARD) return clipboard(text)
+        val methods = when (configured) {
+            InsertMethod.INPUT_CONNECTION -> listOf(InsertMethod.INPUT_CONNECTION)
+            InsertMethod.SET_TEXT -> listOf(InsertMethod.SET_TEXT)
+            InsertMethod.PASTE -> listOf(InsertMethod.PASTE)
+            InsertMethod.AUTO -> if (learned == InsertMethod.SET_TEXT) {
+                listOf(InsertMethod.SET_TEXT, InsertMethod.INPUT_CONNECTION)
+            } else {
+                listOf(InsertMethod.INPUT_CONNECTION, InsertMethod.SET_TEXT)
             }
+            InsertMethod.CLIPBOARD -> emptyList()
         }
-        if (node != null && !node.isShowingHintText) {
-            val current = node.text?.toString()
-            if (current != null && sel.end <= current.length && current.substring(sel.start, sel.end) == sel.text) {
-                val (newText, cursor) = TextSplice.replace(current, sel.start, sel.end, text)
-                val ok = node.performAction(
-                    AccessibilityNodeInfo.ACTION_SET_TEXT,
-                    Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText) },
-                )
-                if (ok) {
-                    node.performAction(
-                        AccessibilityNodeInfo.ACTION_SET_SELECTION,
-                        Bundle().apply {
-                            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
-                            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
-                        },
-                    )
-                    return DeliveryResult(Delivered.INSERTED, "setText")
+        for (method in methods) {
+            when (method) {
+                InsertMethod.INPUT_CONNECTION -> {
+                    if (ic != null) {
+                        val st = runCatching { ic.getSurroundingText(0, 0, 0) }.getOrNull()
+                        if (st != null) {
+                            val current = st.text.subSequence(
+                                st.selectionStart.coerceIn(0, st.text.length),
+                                st.selectionEnd.coerceIn(st.selectionStart.coerceIn(0, st.text.length), st.text.length),
+                            ).toString()
+                            val selectedAgain = current == sel.text || run {
+                                val (prevStart, prevEnd) = (st.offset + st.selectionStart) to (st.offset + st.selectionEnd)
+                                ic.setSelection(sel.start, sel.end)
+                                val check = runCatching { ic.getSurroundingText(0, 0, 0) }.getOrNull()
+                                val ok = check != null && check.text.subSequence(
+                                    check.selectionStart.coerceIn(0, check.text.length),
+                                    check.selectionEnd.coerceIn(check.selectionStart.coerceIn(0, check.text.length), check.text.length),
+                                ).toString() == sel.text
+                                if (!ok) ic.setSelection(prevStart, prevEnd)
+                                ok
+                            }
+                            if (selectedAgain) {
+                                ic.commitText(text, 1, null)
+                                val verified = eventually { textBeforeCursor(ic, text.length + 1)?.endsWith(text) }
+                                if (verified != false) {
+                                    return DeliveryResult(Delivered.INSERTED, "inputConnection")
+                                }
+                            }
+                        }
+                    }
                 }
+                InsertMethod.SET_TEXT -> {
+                    if (node != null && !node.isShowingHintText) {
+                        runCatching { node.refresh() }
+                        val current = node.text?.toString()
+                        if (current != null && sel.end <= current.length && current.substring(sel.start, sel.end) == sel.text) {
+                            val (newText, cursor) = TextSplice.replace(current, sel.start, sel.end, text)
+                            val ok = node.performAction(
+                                AccessibilityNodeInfo.ACTION_SET_TEXT,
+                                Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText) },
+                            )
+                            if (ok) {
+                                node.performAction(
+                                    AccessibilityNodeInfo.ACTION_SET_SELECTION,
+                                    Bundle().apply {
+                                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
+                                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
+                                    },
+                                )
+                                return DeliveryResult(Delivered.INSERTED, "setText")
+                            }
+                        }
+                    }
+                }
+                InsertMethod.PASTE -> {
+                    if (viaPaste(text, node, ic, graph.settings.current.output.hideClipboardPreview)) {
+                        return DeliveryResult(Delivered.PASTED, "paste")
+                    }
+                }
+                else -> Unit
             }
         }
         toast("The selection changed: the result was copied to the clipboard")

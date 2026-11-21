@@ -4,8 +4,8 @@ import io.github.hexalyse.wisprcheap.core.history.HistoryEntry
 import io.github.hexalyse.wisprcheap.core.history.HistoryJson
 import io.github.hexalyse.wisprcheap.core.settings.ApiKeys
 import io.github.hexalyse.wisprcheap.core.settings.Settings
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -155,6 +155,7 @@ fun legacyEntryId(device: String, ts: String): String {
 class SyncEngine(
     private val http: OkHttpClient,
     private val host: SyncHost,
+    private val wallMs: () -> Long = System::currentTimeMillis,
     private val log: (String) -> Unit = {},
 ) {
     private val mutex = Mutex()
@@ -183,6 +184,7 @@ class SyncEngine(
         try {
             run.run()
         } finally {
+            run.clampClockToServer()
             st.hlc = run.clock.last().toString()
             host.saveState(st)
         }
@@ -192,8 +194,16 @@ class SyncEngine(
 
     private fun hash(dk: DataKey, v: JsonElement) = dk.blindId("hash", canonicalJson(v))
 
+    private fun parseServerMs(serverTime: String): Long? =
+        if (serverTime.isBlank()) null else runCatching { Instant.parse(serverTime).toEpochMilli() }.getOrNull()
+
+    private fun maxValidHlc(st: SyncState, maxMs: Long): Hlc? =
+        st.snapshot.values.mapNotNull { Hlc.parse(it.hlc) }.filter { it.ms <= maxMs }.maxOrNull()
+
     private inner class Run(val api: SyncApi, val dk: DataKey, val st: SyncState, val options: SyncOptions, val appVersion: String) {
         var clock = HlcClock(st.deviceId.ifEmpty { "dev_unknown" }).also { c -> Hlc.parse(st.hlc)?.let(c::observe) }
+        var serverMs: Long? = null
+        var maxRemoteHlc: Hlc? = null
         val warnings = mutableListOf<String>()
         val applied = LinkedHashMap<String, Int>()
         val pushed = LinkedHashMap<String, Int>()
@@ -203,6 +213,25 @@ class SyncEngine(
             warnings += message
         }
 
+        fun observeRemote(h: Hlc) {
+            clock.observe(h)
+            val limit = serverMs?.plus(MAX_CLOCK_SKEW_MS)
+            if (limit == null || h.ms <= limit) {
+                val cur = maxRemoteHlc
+                if (cur == null || h > cur) maxRemoteHlc = h
+            }
+        }
+
+        /** Never persist a poisoned future HLC past the server's clock-skew window. */
+        fun clampClockToServer() {
+            val sMs = serverMs ?: return
+            val limit = sMs + MAX_CLOCK_SKEW_MS
+            if (clock.last().ms > limit) {
+                val safe = listOfNotNull(maxValidHlc(st, limit), maxRemoteHlc).maxOrNull()
+                clock.reset(safe)
+            }
+        }
+
         suspend fun run(): SyncOutcome {
             // 0. Local edits since the last sync, before any network call.
             if (st.initialized && st.deviceId.isNotEmpty()) {
@@ -210,6 +239,7 @@ class SyncEngine(
                 host.saveState(st)
             }
             val me = api.me()
+            serverMs = parseServerMs(me.serverTime)
             if (st.deviceId != me.device.id || st.userId != me.user.id) {
                 val (server, keyId) = st.server to st.keyId
                 st.resetData()
@@ -219,6 +249,28 @@ class SyncEngine(
                 st.deviceId = me.device.id
                 st.userId = me.user.id
                 clock = HlcClock(me.device.id)
+            }
+            // Recover from a previously poisoned future HLC once the phone's clock is back within skew.
+            serverMs?.let { sMs ->
+                val limit = sMs + MAX_CLOCK_SKEW_MS
+                if (clock.last().ms > limit) {
+                    clampClockToServer()
+                    val currentWall = wallMs()
+                    if (currentWall <= limit) {
+                        for (i in st.outbox.indices) {
+                            val change = st.outbox[i]
+                            val parsed = Hlc.parse(change.hlc)
+                            if (parsed != null && parsed.ms > limit) {
+                                val fresh = clock.now(currentWall).toString()
+                                val snap = st.snapshot[change.key]
+                                if (snap != null && snap.hlc == change.hlc) {
+                                    st.snapshot[change.key] = snap.copy(hlc = fresh)
+                                }
+                                st.outbox[i] = change.copy(hlc = fresh)
+                            }
+                        }
+                    }
+                }
             }
             st.username = me.user.username
             st.deviceName = me.device.name
@@ -239,7 +291,7 @@ class SyncEngine(
             while (true) {
                 val page = api.pull(st.cursor, PAGE, excludeHistory = !download)
                 for (c in page.changes) {
-                    Hlc.parse(c.hlc)?.let(clock::observe)
+                    Hlc.parse(c.hlc)?.let(::observeRemote)
                     if (c.kind == SyncProfile.HISTORY) {
                         if (download && !c.deleted && c.device != st.deviceId) st.historyInbox += c
                         continue
@@ -278,6 +330,7 @@ class SyncEngine(
 
             // 6. Push.
             var sawStale = false
+            var clockSkewPending = 0
             while (st.outbox.isNotEmpty()) {
                 val candidates = st.outbox.asSequence().filter { (it.payload?.toByteArray(Charsets.UTF_8)?.size ?: 0) <= MAX_PAYLOAD }.take(PAGE).toList()
                 if (candidates.isEmpty()) {
@@ -291,13 +344,14 @@ class SyncEngine(
                     when (r.status) {
                         PushStatus.APPLIED, PushStatus.EXISTS -> pushed[sent.kind] = (pushed[sent.kind] ?: 0) + 1
                         PushStatus.STALE -> r.current?.let {
-                            Hlc.parse(it.hlc)?.let(clock::observe)
+                            Hlc.parse(it.hlc)?.let(::observeRemote)
                             st.pending += it
                             sawStale = true
                         }
                         PushStatus.REJECTED -> {
                             if (r.error == "clock_skew") {
                                 st.snapshot.remove(sent.key)
+                                clockSkewPending++
                                 warn("the server refused a change because this phone's clock is ahead; check the date and time")
                             } else {
                                 warn("the server refused ${sent.key}: ${r.error}")
@@ -314,7 +368,11 @@ class SyncEngine(
 
             // 7-8. History.
             var uploaded = 0
-            if (options.uploadHistory) uploaded = uploadHistory()
+            if (options.uploadHistory) {
+                val (n, retryable) = uploadHistory()
+                uploaded = n
+                clockSkewPending += retryable
+            }
 
             // 9. This month, every device.
             val now = Instant.now()
@@ -334,15 +392,20 @@ class SyncEngine(
             }
 
             st.initialized = true
-            val pending = st.pending.size + st.historyInbox.size + st.outbox.size
+            val pending = st.pending.size + st.historyInbox.size + st.outbox.size + clockSkewPending
             if (pending == 0) st.lastSync = now.toString()
+            clampClockToServer()
             host.saveState(st)
             if (me.capabilities.syncReport) {
                 try {
-                    api.reportSync(SyncReportRequest(
-                        (uploaded + pushed.values.sum()).toLong(), (downloaded + applied.values.sum()).toLong(),
-                        pending.toLong(), appVersion,
-                    ))
+                    api.reportSync(
+                        SyncReportRequest(
+                            (uploaded + pushed.values.sum()).toLong(),
+                            (downloaded + applied.values.sum()).toLong(),
+                            pending.toLong(),
+                            appVersion,
+                        ),
+                    )
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     warn("couldn't report the completed sync: ${e.message}")
@@ -359,7 +422,7 @@ class SyncEngine(
                 val h = hash(dk, rec.value)
                 val snap = st.snapshot[key]
                 if (snap != null && !snap.deleted && snap.hash == h) continue
-                val hlc = clock.now().toString()
+                val hlc = clock.now(wallMs()).toString()
                 st.queue(Change(kind = rec.kind, id = rec.id, hlc = hlc, payload = dk.encryptRecord(st.userId, rec.kind, rec.id, rec.value)))
                 st.snapshot[key] = Snap(hlc, h)
             }
@@ -369,7 +432,7 @@ class SyncEngine(
             for (key in gone) {
                 val kind = key.substringBefore('/')
                 val id = key.substringAfter('/')
-                val hlc = clock.now().toString()
+                val hlc = clock.now(wallMs()).toString()
                 st.queue(Change(kind = kind, id = id, hlc = hlc, deleted = true))
                 st.snapshot[key] = Snap(hlc, deleted = true)
             }
@@ -418,7 +481,8 @@ class SyncEngine(
 
         fun historyChange(e: HistoryEntry): Change? {
             val id = effectiveId(e, st.deviceId)
-            val entry = e.copy(id = id, device = st.deviceId)
+            // Local recording paths are device-specific and meaningless on other devices.
+            val entry = e.copy(id = id, device = st.deviceId, audioFile = null)
             val json = HistoryJson.encode(entry)
             val stats = HistoryStats.fromEntry(json) ?: return null
             val payload = dk.encryptRecord(st.userId, SyncProfile.HISTORY, id, json)
@@ -426,14 +490,14 @@ class SyncEngine(
                 warn("history entry ${e.ts} is too large to upload")
                 return null
             }
-            return Change(kind = SyncProfile.HISTORY, id = id, hlc = clock.now().toString(), payload = payload, stats = stats)
+            return Change(kind = SyncProfile.HISTORY, id = id, hlc = clock.now(wallMs()).toString(), payload = payload, stats = stats)
         }
 
-        suspend fun uploadHistory(): Int {
+        suspend fun uploadHistory(): Pair<Int, Int> {
             val own = host.history.filter { it.device == null || it.device == st.deviceId }
             val changes = mutableListOf<Change>()
             for (id in st.historyDeletes) {
-                changes += Change(kind = SyncProfile.HISTORY, id = id, hlc = clock.now().toString(), deleted = true)
+                changes += Change(kind = SyncProfile.HISTORY, id = id, hlc = clock.now(wallMs()).toString(), deleted = true)
             }
             for (e in own) {
                 val id = effectiveId(e, st.deviceId)
@@ -441,6 +505,7 @@ class SyncEngine(
                 historyChange(e)?.let { changes += it }
             }
             var uploaded = 0
+            var retryable = 0
             var batch = mutableListOf<Change>()
             var size = 0
             suspend fun flush() {
@@ -458,8 +523,13 @@ class SyncEngine(
                             }
                         }
                         PushStatus.REJECTED -> {
-                            warn("history entry ${sent.id} refused: ${r.error}")
-                            if (sent.deleted) st.historyDeletes.remove(sent.id) else st.uploaded += sent.id
+                            if (r.error == "clock_skew") {
+                                retryable++
+                                warn("history entry ${sent.id} refused because this phone's clock is ahead; check the date and time")
+                            } else {
+                                warn("history entry ${sent.id} refused: ${r.error}")
+                                if (sent.deleted) st.historyDeletes.remove(sent.id) else st.uploaded += sent.id
+                            }
                         }
                     }
                 }
@@ -475,7 +545,7 @@ class SyncEngine(
                 if (batch.size >= 200 || size > 600_000) flush()
             }
             flush()
-            return uploaded
+            return uploaded to retryable
         }
 
         suspend fun downloadHistory(changes: List<Change>): Pair<Int, List<Change>> {
@@ -494,7 +564,8 @@ class SyncEngine(
                     continue
                 }
                 val entry = runCatching { HistoryJson.decode(value.jsonObject) }.getOrNull() ?: continue
-                added += entry.copy(id = c.id, device = entry.device ?: c.device)
+                // Never treat a synced recording path from another device as a local file.
+                added += entry.copy(id = c.id, device = entry.device ?: c.device, audioFile = null)
                 known += c.id
             }
             if (added.isNotEmpty()) host.addHistory(added.sortedBy { it.ts })
@@ -505,6 +576,7 @@ class SyncEngine(
     companion object {
         const val PAGE = 500
         const val MAX_PAYLOAD = 64 * 1024
+        const val MAX_CLOCK_SKEW_MS = 10L * 60L * 1000L
 
         /** The keyring request for a new passphrase. */
         fun keyringRequest(userId: String, dk: DataKey, passphrase: String, kdf: KdfParams = KdfParams()): PutKeyringRequest {

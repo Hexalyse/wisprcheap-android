@@ -231,7 +231,7 @@ private fun HistoryDetail(e: HistoryEntry, onDismiss: () -> Unit, onDelete: () -
         },
         confirmButton = {
             Row {
-                if (e.error != null && e.audioFile != null) {
+                if (e.error != null && g.canRetryEntry(e)) {
                     TextButton(onClick = {
                         if (!g.retryEntry(e)) android.widget.Toast.makeText(context, "The recording is no longer available", android.widget.Toast.LENGTH_SHORT).show()
                         onDismiss()

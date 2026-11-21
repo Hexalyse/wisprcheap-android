@@ -51,6 +51,12 @@ class HlcClock(private val node: String) {
         }
     }
 
+    /** Resets the clock back to a known-good timestamp (or zero) after recovering from a fast local clock. */
+    fun reset(to: Hlc? = null) {
+        ms = to?.ms ?: 0L
+        counter = to?.counter ?: 0
+    }
+
     fun last() = Hlc(ms, counter, node)
 }
 

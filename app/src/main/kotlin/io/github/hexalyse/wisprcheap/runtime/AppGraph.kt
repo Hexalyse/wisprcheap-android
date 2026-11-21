@@ -37,13 +37,14 @@ class AppGraph(val app: Application) {
     val log = LogStore(File(app.filesDir, "logs"))
     val settings = SettingsRepository(File(app.filesDir, "settings.json"), scope) { log.error(it) }
     val secrets = SecretStore(File(app.filesDir, "secrets.bin"), scope) { log.error(it) }
+    val failedAudio = FailedAudioFiles(File(app.filesDir, "recordings"))
     val history: HistoryRepository = HistoryRepository(
         File(app.filesDir, "history.jsonl"),
         persist = { settings.current.history.enabled },
         deviceId = { sync.deviceId },
         onDeleted = { sync.historyDeleted(it) },
+        deleteAudio = { failedAudio.delete(it) },
     )
-    val failedAudio = FailedAudioFiles(File(app.filesDir, "recordings"))
     val state = AppState()
     val notifier = Notifier(app, settings)
     val http = Http.client("wisprcheap-android/${BuildConfig.VERSION_NAME}")
@@ -119,6 +120,9 @@ class AppGraph(val app: Application) {
         log.info("Retrying the last failed recording...")
         enqueue(retryJob(failed.pcm))
     }
+
+    /** Whether [entry] references a local saved recording owned by this device. */
+    fun canRetryEntry(entry: HistoryEntry): Boolean = failedAudio.isOwned(entry.audioFile)
 
     /** Retries a failed history entry from its saved audio. */
     fun retryEntry(entry: HistoryEntry): Boolean {
